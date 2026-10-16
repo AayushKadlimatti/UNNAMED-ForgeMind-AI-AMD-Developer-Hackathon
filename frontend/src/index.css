@@ -1,0 +1,153 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* 4-step background elevation */
+  --bg: #0B0F19;
+  --panel: #111827;
+  --panel-raised: #1F2937;
+  --border: #2E3846;
+
+  /* Typography Colors - WCAG AA compliant */
+  --text-primary: #F9FAFB;
+  --text-secondary: #9CA3AF;
+  --text-muted: #6B7280;
+
+  /* Status Colors (Reserved for state only) */
+  --status-ok: #10B981;
+  --status-warn: #F59E0B;
+  --status-crit: #EF4444;
+  --status-info: #06B6D4;
+
+  /* Interactive Accent: ONE accent color (cyan) */
+  --accent: #06B6D4;
+  --accent-hover: #0891B2;
+  --accent-subtle: rgba(6, 182, 212, 0.12);
+
+  /* Spacing Scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radii */
+  --radius-panel: 8px;
+  --radius-control: 6px;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-feature-settings: 'tnum' on, 'zero' on;
+}
+
+/* ── Custom Scrollbar ─────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: var(--panel);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+/* ── Panel & Control Base Styles ─────────────────────────────────── */
+.panel {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+}
+
+.panel-raised {
+  background-color: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+}
+
+.control-btn {
+  border-radius: var(--radius-control);
+  transition: all 0.15s ease-in-out;
+}
+
+.control-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Animations ───────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeInUp {
+  animation: fadeIn 0.25s ease-out both;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+.pulse-dot-regular {
+  animation: pulse-dot 2s infinite ease-in-out;
+}
+
+.pulse-dot-critical {
+  animation: pulse-dot 1s infinite ease-in-out;
+}
+
+/* ── Active Sidebar Link ─────────────────────────────────────────── */
+.sidebar-link-active {
+  background-color: var(--accent-subtle);
+  border-left: 3px solid var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ── Recharts Tooltip ─────────────────────────────────────────────── */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+.custom-tooltip {
+  background: var(--panel) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-panel);
+  padding: 8px 12px;
+}
