@@ -5,6 +5,9 @@ import DiagnosticsModal from './master/DiagnosticsModal';
 import IncidentCard from './master/IncidentCard';
 import { Download, RefreshCw } from 'lucide-react';
 import KnowledgePanel from './components/KnowledgePanel';
+import DemoGuide from './master/DemoGuide';
+import InvestigationEvidence from './master/InvestigationEvidence';
+import { elapsedSeconds } from './master/investigation';
 import { api, setToken } from './api/connected';
 
 const titles = { dashboard: 'Dashboard', equipment: 'Connected machine', predictions: 'AI diagnosis', 'amd-compute': 'Measured inference', maintenance: 'Maintenance work orders', alerts: 'Incident history', analytics: 'Telemetry report', settings: 'Demo access' };
@@ -17,9 +20,12 @@ export default function ConnectedApp() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(() => { try { return localStorage.getItem('forgemind-guide') !== 'hidden'; } catch { return true; } });
+  const [reviewedContext, setReviewedContext] = useState('');
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [noticeError, setNoticeError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [credential, setCredential] = useState('');
   const [user, setUser] = useState(null);
@@ -38,7 +44,7 @@ export default function ConnectedApp() {
   const refresh = useCallback(async () => {
     try {
       const [telemetry, status, alerts, diagnosis, history] = await Promise.all([
-        api('/api/telemetry/history'), api('/api/simulator/status'), api('/api/alerts'), api('/api/diagnostics/latest'), api('/api/diagnostics/history'),
+        api('/api/telemetry/history?limit=300'), api('/api/simulator/status'), api('/api/alerts'), api('/api/diagnostics/latest'), api('/api/diagnostics/history'),
       ]);
       setData({ history: telemetry.history, status, alerts: alerts.alerts, diagnostic: diagnosis.diagnostic, diagnoses: history });
       setError('');
@@ -77,14 +83,15 @@ export default function ConnectedApp() {
   }, []);
 
   function navigate(next) {
+    setDiagnosticOpen(false);
     setView(next);
     if (user && next === 'maintenance') loadTasks();
   }
 
   async function action(fn, message) {
-    setBusy(true); setNotice('');
+    setBusy(true); setNotice(''); setNoticeError(false);
     try { await fn(); setNotice(message); await refresh(); }
-    catch (err) { setNotice(err.message); }
+    catch (err) { setNoticeError(true); setNotice(err.message); }
     finally { setBusy(false); }
   }
   const reading = data?.status.latest_reading;
@@ -93,27 +100,45 @@ export default function ConnectedApp() {
   const completed = diagnosis?.status === 'completed';
   const metrics = diagnosis?.inference;
   const stale = diagnosis && diagnosis.context_id !== data?.status.context_id;
+  const reviewKey = `${diagnosis?.id}:${data?.status.context_id}`;
+  const historicalReviewed = !stale || reviewedContext === reviewKey;
+  const requestBlockedReason = !admin ? 'Connect an administrator token in Settings.' : !data?.status.amd_configured ? 'Configure AMD credentials in the backend .env, then restart the backend.' : !data?.status.is_running ? 'Start monitoring on the Dashboard before requesting analysis.' : reading?.health_status === 'HEALTHY' ? 'Select Warning or Critical on the Dashboard to investigate an abnormal signal.' : '';
+
+  function openInvestigation() { setNotice(''); setSelectedDiagnosis(null); setDiagnosticOpen(true); }
+
+  function toggleGuide() {
+    setGuideOpen(previous => {
+      try { localStorage.setItem('forgemind-guide', previous ? 'hidden' : 'visible'); } catch { /* The guide still works without browser storage. */ }
+      return !previous;
+    });
+  }
 
   function inference() {
+    const task = tasks.find(item => item.id === diagnosis?.work_order_id);
+    const reviewTime = elapsedSeconds(diagnosis?.completed_at, task?.created_at);
     return <section className={panel}>
       <h2 className="font-semibold text-lg">AMD TokenFactory request metrics</h2>
       {!metrics ? <p className="text-gray-400">No completed AMD request yet. Metrics appear after a successful diagnosis.</p> : <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
         {Object.entries({ Model: metrics.model, 'Request duration': `${metrics.request_latency_s} s`, 'Completion tokens': metrics.completion_tokens ?? 'Unavailable', 'End-to-end rate': metrics.end_to_end_tokens_per_sec == null ? 'Unavailable' : `${metrics.end_to_end_tokens_per_sec} tokens/s`, Hardware: metrics.hardware || 'Not reported by provider', 'Measured at': diagnosis.completed_at }).map(([label, value]) => <div key={label}><dt className="text-gray-400">{label}</dt><dd className="mt-1 break-words font-mono">{value}</dd></div>)}
       </dl>}
       <p className="text-xs text-gray-400">Rate includes request waiting and network time. GPU utilization, memory use, decoding-only speed, and 16-request throughput have not been measured.</p>
+      <div className="border-t border-[#374151] pt-4 space-y-3"><h3 className="font-semibold">Observed workflow timing</h3><p className="text-sm">Assessment to work-order approval: <strong className="font-mono">{!user ? 'Connect a demo role to view approval timing' : reviewTime == null ? 'Not measured for this investigation' : `${reviewTime.toFixed(1)} s`}</strong></p><p className="text-xs text-gray-400">Calculated from saved assessment and task timestamps. Includes human waiting time. A manual-workflow baseline and actual downtime savings have not been measured.</p></div>
     </section>;
   }
 
   function diagnosticPanel() {
     return <section className={panel}>
       <div className="flex flex-wrap justify-between items-center gap-3"><h2 className="font-semibold text-lg">AI-assisted investigation</h2>
-        <button className={button} disabled={busy || !admin || data?.diagnostic?.status === 'pending' || (data?.status.retry_after_s || 0) > 0 || reading?.health_status === 'HEALTHY' || !data?.status.is_running} onClick={() => action(async () => { setSelectedDiagnosis(null); return api('/api/diagnostics/request', { method: 'POST' }); }, 'Diagnosis requested. Telemetry continues while AMD responds.')}> {data?.diagnostic?.status === 'pending' ? 'Waiting for AMD…' : (data?.status.retry_after_s || 0) > 0 ? `Retry available in ${data.status.retry_after_s}s` : diagnosis?.status === 'unavailable' ? 'Retry AMD diagnosis' : 'Request AMD diagnosis'}</button></div>
+        <button className={button} disabled={busy || Boolean(requestBlockedReason) || data?.diagnostic?.status === 'pending' || (data?.status.retry_after_s || 0) > 0} onClick={() => action(async () => { setSelectedDiagnosis(null); return api('/api/diagnostics/request', { method: 'POST' }); }, 'Diagnosis requested. Telemetry continues while AMD responds.')}> {data?.diagnostic?.status === 'pending' ? 'Waiting for AMD…' : (data?.status.retry_after_s || 0) > 0 ? `Retry available in ${data.status.retry_after_s}s` : diagnosis?.status === 'unavailable' ? 'Retry AMD diagnosis' : 'Request AMD diagnosis'}</button></div>
       {!admin && <p className="text-sm text-[#F59E0B]">Connect an administrator demo token in Settings to request a diagnosis or approve a work order.</p>}
+      {admin && requestBlockedReason && <p className="text-sm text-[#F59E0B]">{requestBlockedReason}</p>}
       {data?.diagnoses.length > 0 && <label className="block text-sm">Investigation history<select className={input} value={selectedDiagnosis || ''} onChange={e => setSelectedDiagnosis(e.target.value || null)}><option value="">Latest investigation</option>{data.diagnoses.map(item => <option key={item.id} value={item.id}>{new Date(item.timestamp).toLocaleString()} · {item.status}</option>)}</select></label>}
       {!diagnosis && <p className="text-gray-400">No diagnosis requested. Select an abnormal scenario, then request analysis.</p>}
       {diagnosis && <><p className="text-sm">Status: <strong>{diagnosis.status}</strong> · Recorded {new Date(diagnosis.timestamp).toLocaleString()}</p>
         {stale && <p className="text-[#F59E0B] text-sm">Historical investigation: the monitoring context has changed. Review its saved sensor snapshot before acting.</p>}
         {diagnosis.message && <p role="status" className="text-[#F3F4F6]">{diagnosis.message}</p>}
+        {diagnosis.status === 'pending' && <div className="master-pending" role="status"><span className="master-pending-indicator" /><div><strong>AMD is reviewing the captured evidence</strong><p>You can close this panel. Monitoring continues, and the result is saved automatically. The request has a 90-second deadline.</p></div></div>}
+        <InvestigationEvidence diagnosis={diagnosis} task={tasks.find(item => item.id === diagnosis.work_order_id)} />
         {completed && <>
           <div className="master-confidence"><span>Diagnostic confidence</span><strong>Not calibrated · human review required</strong></div>
           <p className="master-hypothesis">{diagnosis.primaryHypothesis?.description}</p>
@@ -123,12 +148,13 @@ export default function ConnectedApp() {
           <ul className="list-disc pl-5 space-y-1 text-xs text-gray-400">{diagnosis.limitations?.map((item, i) => <li key={i}>{item}</li>)}</ul>
           <p className="text-xs text-gray-400">Trend readings supplied: {diagnosis.trend_readings || 0} · Matching reference excerpts: {diagnosis.references?.length || 0}</p>
           {diagnosis.references?.map(ref => <details key={ref.excerpt_id}><summary className="text-sm text-[#06B6D4] cursor-pointer">Reference: {ref.title}</summary><p className="text-xs text-gray-400">{ref.source} · User-supplied</p><p className="text-sm whitespace-pre-wrap mt-2">{ref.excerpt}</p></details>)}
-          {diagnosis.work_order_id ? <div className="space-y-2 border-t border-[#374151] pt-4"><p className="text-sm break-all">Saved work order: {diagnosis.work_order_id}</p><button className={button} onClick={() => navigate('maintenance')}>Open maintenance</button></div> : <form data-task-form className="space-y-3 border-t border-[#374151] pt-4" onSubmit={e => { e.preventDefault(); action(async () => { const task = await api(`/api/diagnostics/${diagnosis.id}/work-order`, { method: 'POST', body: JSON.stringify({ title: taskTitle, assigned_to: assignee, priority }) }); await loadTasks(); setDiagnosticOpen(false); setView('maintenance'); return task; }, 'Inspection work order saved. Repeated approval reuses the same order.'); }}>
+          {diagnosis.work_order_id ? <div className="space-y-2 border-t border-[#374151] pt-4"><p className="text-sm break-all">Saved work order: {diagnosis.work_order_id}</p><button className={button} onClick={() => navigate('maintenance')}>Open maintenance</button></div> : <form data-task-form className="space-y-3 border-t border-[#374151] pt-4" onSubmit={e => { e.preventDefault(); if (!historicalReviewed) return; action(async () => { const task = await api(`/api/diagnostics/${diagnosis.id}/work-order`, { method: 'POST', body: JSON.stringify({ title: taskTitle, assigned_to: assignee, priority, reviewed_historical_context: stale && historicalReviewed }) }); await loadTasks(); setDiagnosticOpen(false); setView('maintenance'); return task; }, 'Inspection work order saved. Repeated approval reuses the same order.'); }}>
             <h3 className="font-semibold">Approve an inspection work order</h3>
+            {stale && <label className="master-historical-review"><input type="checkbox" checked={historicalReviewed} onChange={e => setReviewedContext(e.target.checked ? reviewKey : '')} />I reviewed the saved sensor evidence and understand this investigation belongs to an earlier monitoring context.</label>}
             <label className="block text-sm">Task title<input className={input} value={taskTitle} onChange={e => setTaskTitle(e.target.value)} required minLength={1} maxLength={300} /></label>
             <label className="block text-sm">Assign to<input className={input} value={assignee} onChange={e => setAssignee(e.target.value)} required minLength={1} maxLength={100} /></label>
             <label className="block text-sm">Priority<select className={input} value={priority} onChange={e => setPriority(e.target.value)}>{['LOW', 'MEDIUM', 'HIGH', 'EMERGENCY'].map(value => <option key={value}>{value}</option>)}</select></label>
-            <button className={button} disabled={!admin || busy || !assignee.trim() || !taskTitle.trim()}>Approve and save work order</button>
+            <button className={button} disabled={!admin || busy || !historicalReviewed || !assignee.trim() || !taskTitle.trim()}>Approve and save work order</button>
           </form>}
         </>}
       </>}
@@ -143,6 +169,8 @@ export default function ConnectedApp() {
         {!tasksLoading && !taskError && tasks.length === 0 && <p className="text-gray-400">No work orders yet. Review a completed diagnosis and approve an inspection task.</p>}
         {!tasksLoading && tasks.length > 0 && !tasks.some(task => taskFilter === 'all' || task.status === taskFilter) && <p>No work orders match this status.</p>}
         {tasks.filter(task => taskFilter === 'all' || task.status === taskFilter).map(task => <article className="p-4 border border-[#374151] rounded-md space-y-2" key={task.id}><h3 className="font-semibold">{task.title}</h3><p className="text-sm text-[#F3F4F6]">{task.machine_id} · {task.assigned_to} · {task.priority} · {task.status}</p><p className="text-xs font-mono text-gray-400 break-all">{task.id}</p>
+          <p className="text-xs text-gray-400">Created {new Date(task.created_at).toLocaleString()} · Updated {new Date(task.updated_at).toLocaleString()}</p>
+          {data?.diagnoses.find(item => item.work_order_id === task.id) && <button className="master-text-button" onClick={() => { setSelectedDiagnosis(data.diagnoses.find(item => item.work_order_id === task.id).id); setDiagnosticOpen(true); }}>View linked investigation evidence</button>}
           {task.status !== 'Completed' && <form className="flex flex-wrap gap-2" onSubmit={e => { e.preventDefault(); action(async () => { await api(`/api/v1/tasks/${task.id}/assign`, { method: 'PATCH', body: JSON.stringify({ assigned_to: assignmentEdits[task.id] || task.assigned_to }) }); await loadTasks(); }, 'Assignment saved.'); }}><label className="text-sm">Assigned technician<input className={input} value={assignmentEdits[task.id] ?? task.assigned_to} onChange={e => setAssignmentEdits({ ...assignmentEdits, [task.id]: e.target.value })} required maxLength={100} /></label><button className={button} disabled={busy || !(assignmentEdits[task.id] ?? task.assigned_to).trim()}>Save assignment</button></form>}
           {task.status !== 'Completed' && <button className={button} disabled={busy} onClick={() => action(async () => { await api(`/api/v1/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: task.status === 'Pending' ? 'In Progress' : 'Completed' }) }); await loadTasks(); }, 'Work order updated.')}>{task.status === 'Pending' ? 'Start inspection' : 'Mark completed'}</button>}
         </article>)}
@@ -161,7 +189,7 @@ export default function ConnectedApp() {
 
   function content() {
     if (view === 'settings') return <section className={panel}><h2 className="text-lg font-semibold">Connect a demo role</h2><p className="text-sm text-gray-400">Use FORGEMIND_ADMIN_TOKEN or FORGEMIND_TECHNICIAN_TOKEN from the local integration .env. This is a demo access token, never your AMD API key. Your session survives refresh for up to eight hours on this local app. Sign out on shared computers.</p>
-      <form className="space-y-3" onSubmit={async e => { e.preventDefault(); setToken(credential); setBusy(true); try { const current = await api('/api/session', { method: 'POST' }); setToken(''); setUser(current); await loadTasks(); setCredential(''); setNotice(`Connected as ${current.role}`); } catch (err) { setToken(''); setUser(null); setNotice(err.message); } finally { setBusy(false); } }}><label className="block">Demo access token<input type="password" autoComplete="off" className={input} value={credential} onChange={e => setCredential(e.target.value)} required /></label><button className={button} disabled={busy}>Connect</button></form>
+      <form className="space-y-3" onSubmit={async e => { e.preventDefault(); setToken(credential); setBusy(true); setNoticeError(false); try { const current = await api('/api/session', { method: 'POST' }); setToken(''); setUser(current); await loadTasks(); setCredential(''); setNotice(`Connected as ${current.role}`); } catch (err) { setToken(''); setUser(null); setNoticeError(true); setNotice(err.message); } finally { setBusy(false); } }}><label className="block">Demo access token<input type="password" autoComplete="off" className={input} value={credential} onChange={e => setCredential(e.target.value)} required /></label><button className={button} disabled={busy}>Connect</button></form>
       {admin && <details><summary className="cursor-pointer text-[#06B6D4]" onClick={() => action(async () => { setAudit(await api('/api/v1/admin/audit-logs?limit=100')); }, 'Audit log loaded')}>View audit log</summary>{audit?.slice().reverse().map(log => <article className="py-2 border-b border-[#374151] text-xs" key={log.id}><p>{new Date(log.timestamp).toLocaleString()} · {log.username} · {log.action}</p><pre className="whitespace-pre-wrap break-all text-gray-400">{log.details}</pre></article>)}</details>}
       {user && <button className={button} onClick={() => action(async () => { await api('/api/session', { method: 'DELETE' }); setToken(''); setUser(null); setTasks([]); }, 'Disconnected')}>Disconnect {user.role}</button>}
     </section>;
@@ -178,16 +206,16 @@ export default function ConnectedApp() {
     if (view === 'predictions') return <>{diagnosticPanel()}<KnowledgePanel user={user} /></>;
     if (view === 'alerts') return <section className={panel}><div className="master-section-title"><div><h2>Incident history</h2><p>Saved alerts, acknowledgements, and recoveries for Conveyor Motor 01.</p></div><label className="text-sm">Show incidents<select className={input} value={alertFilter} onChange={e => setAlertFilter(e.target.value)}>{['active', 'resolved', 'all'].map(value => <option key={value}>{value}</option>)}</select></label></div><div className="master-incident-list">{data?.alerts.filter(alert => alertFilter === 'all' || alert.state === alertFilter).map(alert => <IncidentCard key={alert.id} alert={alert} onInvestigate={() => { setNotice(''); setSelectedDiagnosis(null); setDiagnosticOpen(true); }} onDispatch={() => { setNotice(''); setSelectedDiagnosis(null); setDiagnosticOpen(true); }} canDispatch={admin && completed && !stale && !diagnosis.work_order_id && alert.state === 'active'} canAcknowledge={Boolean(user)} busy={busy} onAcknowledge={() => action(() => api(`/api/alerts/${alert.id}/acknowledge`, { method: 'PATCH' }), 'Incident acknowledged; acknowledgement does not resolve the fault.')} />)}</div>{!data?.alerts.some(alert => alertFilter === 'all' || alert.state === alertFilter) && <div className="master-empty"><strong>No {alertFilter === 'all' ? '' : alertFilter} incidents</strong>Incidents appear when a demo threshold is exceeded.</div>}</section>;
     if (view === 'analytics') return <section className={panel}><h2 className="text-lg font-semibold">Latest persisted telemetry</h2><button className={button} onClick={downloadReport} disabled={!data?.history.length}>Download readings CSV</button><p className="text-sm text-gray-400">Synthetic readings only; no failure-prediction accuracy or financial savings have been evaluated.</p><div className="overflow-auto"><table className="w-full text-sm text-left"><thead><tr>{['Observed', '°C', 'mm/s RMS', 'A', 'State'].map(h => <th className="p-2" key={h}>{h}</th>)}</tr></thead><tbody>{data?.history.slice().reverse().map(row => <tr key={row.id}><td className="p-2 whitespace-nowrap">{new Date(row.timestamp).toLocaleTimeString()}</td><td>{row.temperature}</td><td>{row.vibration}</td><td>{row.current}</td><td>{row.health_status}</td></tr>)}</tbody></table></div></section>;
-    return <MasterDashboard data={data} user={user} tasks={tasks} tasksLoading={tasksLoading} taskError={taskError} search={search} onSearch={setSearch} onClearSearch={() => setSearch('')} statusFilter={statusFilter} onStatusFilter={setStatusFilter} busy={busy} action={action} navigate={navigate} onInvestigate={() => { setNotice(''); setSelectedDiagnosis(null); setDiagnosticOpen(true); }} onAllAlerts={() => { setAlertFilter('all'); navigate('alerts'); }} />;
+    return <>{guideOpen && <DemoGuide data={data} user={user} tasks={tasks} onNavigate={next => { if (next === 'alerts') setAlertFilter('all'); navigate(next); }} onInvestigate={openInvestigation} />}<MasterDashboard data={data} user={user} tasks={tasks} tasksLoading={tasksLoading} taskError={taskError} search={search} onSearch={setSearch} onClearSearch={() => setSearch('')} statusFilter={statusFilter} onStatusFilter={setStatusFilter} busy={busy} action={action} navigate={navigate} onInvestigate={openInvestigation} onAllAlerts={() => { setAlertFilter('all'); navigate('alerts'); }} /></>;
   }
 
   return <ConsoleShell view={view} title={titles[view]} user={user} activeAlerts={data?.status.active_incidents || 0} connected={Boolean(data) && !error && !data?.status.monitor_error} running={data?.status.is_running} onNavigate={navigate} search={search} onSearch={setSearch}>
-    <div className="master-page-heading"><div><div className="master-eyebrow">INDUSTRIAL OPERATIONS</div><h1>{view === 'dashboard' ? 'Machine Operations' : titles[view]}</h1><p>{view === 'dashboard' ? 'Live telemetry and incident response for Conveyor Motor 01.' : 'Conveyor Motor 01 · Industrial monitoring workspace'}</p></div><div className="flex flex-wrap items-center gap-3"><span className="master-data-source"><i />SIMULATED TELEMETRY</span><button className="master-button master-secondary" aria-label="Refresh data" onClick={refresh}><RefreshCw size={14} />Refresh</button>{view === 'dashboard' && <button className="master-button master-primary" disabled={!data?.history.length} onClick={downloadReport}><Download size={14} />Export readings</button>}</div></div>
-    {notice && <div role="status" className="master-notice">{notice}<button aria-label="Dismiss notification" onClick={() => setNotice('')}>Dismiss</button></div>}
+    <div className="master-page-heading"><div><div className="master-eyebrow">INDUSTRIAL OPERATIONS</div><h1>{view === 'dashboard' ? 'Machine Operations' : titles[view]}</h1><p>{view === 'dashboard' ? 'Live telemetry and incident response for Conveyor Motor 01.' : 'Conveyor Motor 01 · Industrial monitoring workspace'}</p></div><div className="flex flex-wrap items-center gap-3"><span className="master-data-source"><i />SIMULATED TELEMETRY</span><button className="master-button master-secondary" aria-label="Refresh data" onClick={refresh}><RefreshCw size={14} />Refresh</button>{view === 'dashboard' && <button className="master-button master-secondary" aria-pressed={guideOpen} onClick={toggleGuide}>{guideOpen ? 'Hide walkthrough' : 'Demo walkthrough'}</button>}{view === 'dashboard' && <button className="master-button master-primary" disabled={!data?.history.length} onClick={downloadReport}><Download size={14} />Export readings</button>}</div></div>
+    {notice && <div role={noticeError ? 'alert' : 'status'} className={`master-notice ${noticeError ? 'master-error' : ''}`}>{notice}<button aria-label="Dismiss notification" onClick={() => setNotice('')}>Dismiss</button></div>}
     {error && <div role="alert" className="master-notice master-error">Connection error: {error}. Saved content may be stale.<button onClick={refresh}>Retry</button></div>}
     {!data && !error && <p role="status">Loading conveyor data…</p>}
     {data?.status.monitor_error && <p role="alert" className="text-[#F59E0B]">{data.status.monitor_error}</p>}
     {(data || view === 'settings') && content()}
-    <DiagnosticsModal open={diagnosticOpen} onClose={() => setDiagnosticOpen(false)} canCreate={admin && completed && !diagnosis?.work_order_id}>{notice && <div className="master-notice" role="status">{notice}</div>}{diagnosticPanel()}</DiagnosticsModal>
+    <DiagnosticsModal open={diagnosticOpen} onClose={() => setDiagnosticOpen(false)} canCreate={admin && completed && historicalReviewed && !diagnosis?.work_order_id}>{notice && <div className={`master-notice ${noticeError ? 'master-error' : ''}`} role={noticeError ? 'alert' : 'status'}>{notice}</div>}{diagnosticPanel()}</DiagnosticsModal>
   </ConsoleShell>;
 }

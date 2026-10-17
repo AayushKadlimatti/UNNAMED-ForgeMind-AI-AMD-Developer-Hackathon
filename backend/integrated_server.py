@@ -12,7 +12,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .simulator import ConveyorMotorSimulator
@@ -175,6 +175,7 @@ def disconnect_session(response: Response):
 def simulator_status(request: Request):
     state = request.app.state
     return {**state.simulator.get_status(), 'latest_reading': state.latest, 'is_simulated': True,
+            'amd_configured': amd_configured(),
             'context_id': state.context_id, 'monitor_error': state.monitor_error,
             'retry_after_s': round(max(0, 45 - (time.monotonic() - state.last_requested))),
             'active_incidents': sum(item.get('state') == 'active' for item in state.store.list('alert', 1000))}
@@ -278,14 +279,19 @@ async def request_diagnosis(request: Request, user: User = Depends(require_admin
                   'status': 'pending', 'message': 'Waiting for AMD', 'confidence': None,
                   'telemetry_snapshot': reading, 'data_source': 'synthetic', 'requires_human_review': True,
                   'primaryHypothesis': None, 'alternatives': [], 'remediationSteps': [], 'inference': None,
-                  'context_id': state.context_id, 'references': references, 'trend_readings': len(readings)}
+                  'context_id': state.context_id, 'references': references, 'trend_readings': len(readings),
+                  'context_readings': context['recent_readings']}
         state.store.save('diagnosis', record)
         state.inference_task = asyncio.create_task(infer(request.app, record, {**reading, 'analysis_context': context}))
         return {'diagnostic': record, 'status': 'pending'}
 
 
+class ReviewedWorkOrder(IntegrationTaskRequest):
+    reviewed_historical_context: bool = Field(default=False, strict=True)
+
+
 @app.post('/api/diagnostics/{diagnosis_id}/work-order', response_model=TaskResponse, status_code=201)
-async def create_work_order(diagnosis_id: str, payload: IntegrationTaskRequest, request: Request,
+async def create_work_order(diagnosis_id: str, payload: ReviewedWorkOrder, request: Request,
                             user: User = Depends(require_admin), db: Session = Depends(get_db)):
     async with request.app.state.work_order_lock:
         record = request.app.state.store.get(diagnosis_id)
@@ -297,8 +303,12 @@ async def create_work_order(diagnosis_id: str, payload: IntegrationTaskRequest, 
                 record['work_order_id'] = details['task_id']
                 request.app.state.store.save('diagnosis', record)
                 return db.get(MaintenanceTask, details['task_id'])
-        task = add_task(db, TaskCreate(machine_id=MACHINE, **payload.model_dump()), user)
-        record_audit(db, user, 'DIAGNOSIS_WORK_ORDER_APPROVED', {'diagnosis_id': diagnosis_id, 'task_id': task.id, 'data_source': 'synthetic'})
+        historical = record.get('context_id') != request.app.state.context_id
+        if historical and not payload.reviewed_historical_context:
+            raise HTTPException(409, 'Monitoring context changed. Review the saved evidence and explicitly confirm historical context before approval.')
+        task = add_task(db, TaskCreate(machine_id=MACHINE, **payload.model_dump(exclude={'reviewed_historical_context'})), user)
+        record_audit(db, user, 'DIAGNOSIS_WORK_ORDER_APPROVED', {'diagnosis_id': diagnosis_id, 'task_id': task.id, 'data_source': 'synthetic',
+                    'historical_context': historical, 'reviewed_historical_context': payload.reviewed_historical_context})
         commit_changes(db)
         record['work_order_id'] = task.id
         request.app.state.store.save('diagnosis', record)

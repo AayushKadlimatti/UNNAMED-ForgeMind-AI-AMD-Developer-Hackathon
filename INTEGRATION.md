@@ -8,8 +8,8 @@ In this folder, create an environment and install backend dependencies:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe scripts/configure_demo.py
 ```
 
 For this already-configured workspace, keep the existing `.env` instead of copying over it. It contains the AMD endpoint, model, and private key, plus distinct randomly generated admin and technician demo tokens. Do not commit or share it.
@@ -73,7 +73,7 @@ cd frontend
 npm run build
 ```
 
-The 22 automated tests simulate AMD and cover role checks, units, no automatic provider calls, duplicate pending requests, cooldown, provider failure and retry, work-order idempotency, task lifecycle, sample-manual labels, saved data after restart, warning stability, incident escalation/acknowledgement/recovery, refresh-safe sessions, cross-origin rejection for cookie-authenticated writes, document permissions and search, captured trend/reference context, and reassignment rules. A separate live integration request completed in 26.2647 seconds with DeepSeek-V4-Flash, 338 completion tokens, and 12.87 end-to-end tokens/sec. That single run is evidence of connectivity, not a reliability benchmark.
+The 24 automated backend/provider/setup tests simulate AMD and cover role checks, units, no automatic provider calls, duplicate pending requests, cooldown, provider failure and retry, work-order idempotency, task lifecycle, sample-manual labels, saved data after restart, warning stability, incident escalation/acknowledgement/recovery, refresh-safe sessions, cross-origin rejection for cookie-authenticated writes, document permissions and search, captured trend/reference context, and reassignment rules. A separate live integration request completed in 26.2647 seconds with DeepSeek-V4-Flash, 338 completion tokens, and 12.87 end-to-end tokens/sec. That single run is evidence of connectivity, not a reliability benchmark.
 
 ## Latest completion checks
 
@@ -84,3 +84,14 @@ The source document library still needs your team's actual permitted reference m
 ## Master design applied
 
 The supplied specifications are saved under `design/`. Reusable connected components are in `frontend/src/master/`. The active app remains React/Tailwind so existing sessions, diagnosis requests, reference search, work orders, history and CSV export continue working. Dashboard charts include time/value axes, keyboard-accessible reading tooltips and illustrative threshold lines, using saved readings; no mock traces or fixed confidence scores are mounted. On mobile, open the menu button for navigation. Use Investigate on an incident or Open investigation below the feed to open the modal. Escape closes it and returns focus.
+
+
+## Judge-demo tools
+
+After setup, `scripts/start-demo.ps1` runs both local servers in one terminal. It checks setup, refuses occupied ports and keeps logs under ignored data/. `scripts/preflight.py` is read-only and never calls AMD. The launcher does not install dependencies or overwrite credentials.
+
+The Dashboard's optional Demo walkthrough explains the real operator flow. Charts can display the latest 30, 100 or 300 saved samples, with actual time spacing and visible gaps for monitoring pauses. New AMD requests save the full trend input, which is available in the evidence panel. Export investigation downloads a Markdown evidence report; it does not claim a repaired machine or measured downtime savings.
+
+A historical investigation can be used to approve an inspection only after explicitly acknowledging review of its saved evidence. The API requires reviewed_historical_context=true when the monitoring context differs, and records that acknowledgement in the audit log. Repeated approval of an already saved task remains idempotent.
+
+Frontend evidence/report/chart tests: run `node --test tests/investigation.test.mjs` from frontend/. For an explicit live rehearsal, `python scripts/rehearse_live.py --live-amd` makes one real AMD request, creates a labelled rehearsal work order and changes synthetic scenarios. It does not reset or delete existing history. See docs/JUDGE-DEMO.md before recording.

@@ -4,8 +4,11 @@ import StatusSummary from './StatusSummary';
 import TelemetryCard from './TelemetryCard';
 import { fields } from './telemetry';
 import IncidentCard from './IncidentCard';
+import { useState } from 'react';
 
 export default function Dashboard({ data, user, tasks, tasksLoading, taskError, search, onSearch, onClearSearch, statusFilter, onStatusFilter, busy, action, navigate, onInvestigate, onAllAlerts }) {
+  const [sampleWindow, setSampleWindow] = useState(100);
+  const chartHistory = (data?.history || []).slice(-sampleWindow);
   const reading = data?.status.latest_reading;
   const status = (reading?.health_status || '').toLowerCase();
   const visible = fields.filter(config => (!search || `${config.title} CONV-MTR-01 conveyor`.toLowerCase().includes(search.toLowerCase())) && (statusFilter === 'all' || status === statusFilter));
@@ -14,8 +17,8 @@ export default function Dashboard({ data, user, tasks, tasksLoading, taskError, 
   return <>
     <label className="master-inline-search"><Search size={17} /><input aria-label="Filter machine and incidents" placeholder="Search machine or incidents…" value={search} onChange={e => onSearch(e.target.value)} /></label>
     <StatusSummary status={status} hasReading={Boolean(reading)} maintenanceCount={user && !taskError && !tasksLoading ? new Set(tasks.filter(task => task.status !== 'Completed').map(task => task.machine_id)).size : null} selected={statusFilter} onSelect={key => key === 'maintenance' ? navigate('maintenance') : onStatusFilter(statusFilter === key ? 'all' : key)} />
-    <section><div className="master-section-title"><div><h2>Machine Telemetry <span className="master-count">1 MACHINE</span></h2><p>Conveyor Motor 01 · Three sensor channels · Most recent {data?.history.length || 0} saved readings</p></div><button onClick={() => navigate('equipment')}>View machine <ArrowRight size={14} /></button></div>
-      <div className="master-telemetry-grid">{visible.map((config, index) => <TelemetryCard key={config.field} config={config} reading={reading} history={data?.history || []} running={data?.status.is_running} index={index} onFullData={() => navigate('analytics')} />)}</div>
+    <section><div className="master-section-title"><div><h2>Machine Telemetry <span className="master-count">1 MACHINE</span></h2><p>Conveyor Motor 01 · Three sensor channels · Showing {chartHistory.length} of {data?.history.length || 0} saved readings</p></div><div className="master-chart-controls"><label>Chart window<select className="master-input" value={sampleWindow} onChange={event => setSampleWindow(Number(event.target.value))}>{[30, 100, 300].map(count => <option key={count} value={count}>Last {count} samples</option>)}</select></label><button onClick={() => navigate('equipment')}>View machine <ArrowRight size={14} /></button></div></div>
+      <div className="master-telemetry-grid">{visible.map((config, index) => <TelemetryCard key={config.field} config={config} reading={reading} history={chartHistory} running={data?.status.is_running} index={index} onFullData={() => navigate('analytics')} />)}</div>
       {!visible.length && <div className="master-empty"><strong>No channels match this filter</strong><button className="master-text-button" onClick={() => { onStatusFilter('all'); onClearSearch(); }}>Clear filters</button></div>}
     </section>
     <section className="master-controls" aria-label="Synthetic scenario controls"><span className="master-controls-label">DEMO SCENARIO</span><div className="master-control-group">{['normal', 'warning', 'critical', 'recovery'].map(scenario => <button disabled={busy} aria-pressed={data?.status.scenario === scenario} key={scenario} onClick={() => action(() => api('/api/simulator/scenario', { method: 'POST', body: JSON.stringify({ scenario }) }), `Scenario changed to ${scenario}`)}>{scenario}</button>)}</div><span className="master-control-divider" /><button disabled={busy} onClick={() => action(() => api(`/api/simulator/${data?.status.is_running ? 'stop' : 'start'}`, { method: 'POST' }), 'Simulator updated')}>{data?.status.is_running ? 'Pause monitoring' : 'Start monitoring'}</button><button disabled={busy} onClick={() => action(() => api('/api/simulator/reset', { method: 'POST' }), 'Readings reset. Saved investigations and work orders are retained.')}>Reset readings</button><span className="master-controls-note">Software-generated readings</span></section>

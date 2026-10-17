@@ -281,3 +281,46 @@ def test_assignment_persists_and_completed_tasks_cannot_be_reassigned(monkeypatc
         for status in ('In Progress', 'Completed'):
             client.patch(path + '/status', headers=TECH_AUTH, json={'status': status})
         assert client.patch(path + '/assign', headers=AUTH, json={'assigned_to': 'Third technician'}).status_code == 409
+
+def test_historical_approval_requires_explicit_review_and_is_idempotent(monkeypatch):
+    monkeypatch.setattr(server, 'diagnose', fake_diagnosis)
+    with TestClient(server.app) as client:
+        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
+        client.post('/api/diagnostics/request', headers=AUTH)
+        diagnosis = wait_finished(client)
+        assert diagnosis['context_readings'][-1]['health_status'] == 'CRITICAL'
+        original_readings = diagnosis['context_readings']
+        client.post('/api/simulator/scenario', json={'scenario': 'normal'})
+        endpoint = '/api/diagnostics/' + diagnosis['id'] + '/work-order'
+        payload = {'title': 'Historical evidence review', 'assigned_to': 'Reviewer', 'priority': 'HIGH'}
+        assert client.post(endpoint, headers=AUTH, json=payload).status_code == 409
+        assert client.post(endpoint, headers=AUTH, json={**payload, 'reviewed_historical_context': 'true'}).status_code == 422
+        approved = client.post(endpoint, headers=AUTH, json={**payload, 'reviewed_historical_context': True})
+        assert approved.status_code == 201
+        task_id = approved.json()['id']
+        # Retrying an already approved task remains idempotent, even after context changes.
+        assert client.post(endpoint, headers=AUTH, json=payload).json()['id'] == task_id
+        audit = client.get('/api/v1/admin/audit-logs', headers=AUTH).json()
+        import json
+        approval = next(json.loads(row['details']) for row in audit if row['action'] == 'DIAGNOSIS_WORK_ORDER_APPROVED')
+        assert approval['historical_context'] is True
+        assert approval['reviewed_historical_context'] is True
+    with TestClient(server.app) as client:
+        saved = client.get('/api/diagnostics/latest').json()['diagnostic']
+        assert saved['context_readings'] == original_readings
+        assert saved['work_order_id'] == task_id
+
+def test_configure_demo_preserves_existing_secrets_and_generates_distinct_roles(tmp_path):
+    from scripts.configure_demo import configure
+    from dotenv import dotenv_values
+    (tmp_path / '.env.example').write_text('AMD_API_KEY=\nFORGEMIND_ADMIN_TOKEN=\nFORGEMIND_TECHNICIAN_TOKEN=\n', encoding='utf-8')
+    assert configure(tmp_path) is False
+    first = dotenv_values(tmp_path / '.env')
+    assert len(first['FORGEMIND_ADMIN_TOKEN']) >= 32
+    assert first['FORGEMIND_ADMIN_TOKEN'] != first['FORGEMIND_TECHNICIAN_TOKEN']
+    with (tmp_path / '.env').open('a', encoding='utf-8') as stream:
+        stream.write('\nAMD_API_KEY=local-test-value\n')
+    assert configure(tmp_path) is True
+    second = dotenv_values(tmp_path / '.env')
+    assert second['FORGEMIND_ADMIN_TOKEN'] == first['FORGEMIND_ADMIN_TOKEN']
+    assert second['AMD_API_KEY'] == 'local-test-value'

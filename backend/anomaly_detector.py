@@ -18,10 +18,9 @@ class AnomalyDetectionEngine:
     TEMP_NORMAL_MAX = 72.0
     TEMP_WARNING_MAX = 80.0
 
-    # Vibration RMS Thresholds (mm/s) - ISO 10816-3 Group 2 Rigid Foundation
-    # Zone A/B (Good/Acceptable): < 2.8 mm/s
-    # Zone C (Restricted / Alert): 2.8 - 4.5 mm/s
-    # Zone D (Dangerous / Critical): > 4.5 mm/s
+    # Illustrative vibration velocity RMS limits (mm/s).
+    # These values have not been calibrated for a physical motor or validated
+    # against a standards classification; they drive synthetic demo scenarios.
     VIB_NORMAL_MAX = 2.80
     VIB_WARNING_MAX = 4.50
 
