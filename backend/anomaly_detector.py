@@ -1,20 +1,18 @@
 """
 backend/anomaly_detector.py - Real-Time Anomaly Detection Engine for ForgeMind AI
-Evaluates machine telemetry using statistical thresholds and multi-parameter
+Evaluates demo telemetry using illustrative thresholds and multi-parameter
 anomaly distance metrics (independent of the LLM).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any, Dict, List, Tuple
 
 
 class AnomalyDetectionEngine:
-    """
-    Standard industrial diagnostic limits for Class II medium AC motors (15kW-300kW)
-    based on ISO 10816-3 vibration severity and NEMA Class F motor insulation standards.
-    """
+    """Illustrative velocity-based demo limits; not calibrated or standards-certified."""
 
     # Temperature Thresholds (°C) - Stator & Bearing Housing
     TEMP_NORMAL_MAX = 72.0
@@ -37,9 +35,11 @@ class AnomalyDetectionEngine:
         Evaluate a single telemetry reading without calling any LLM.
         Returns health status, composite anomaly score, responsible parameters, and timestamp.
         """
-        temp = float(reading.get("temperature", 65.0))
-        vib = float(reading.get("vibration", 2.1))
-        curr = float(reading.get("current", 15.0))
+        temp = float(reading["temperature"])
+        vib = float(reading["vibration"])
+        curr = float(reading["current"])
+        if not all(isfinite(v) for v in (temp, vib, curr)) or vib < 0 or curr < 0:
+            raise ValueError("Invalid sensor reading")
 
         reasons: List[str] = []
         is_critical = False
@@ -56,18 +56,18 @@ class AnomalyDetectionEngine:
         # 2. Vibration evaluation
         if vib > self.VIB_WARNING_MAX:
             is_critical = True
-            reasons.append(f"Vibration Critical: {vib:.2f} mm/s exceeds ISO 10816-3 Zone D limit ({self.VIB_WARNING_MAX} mm/s)")
+            reasons.append(f"Vibration Critical: {vib:.2f} mm/s exceeds demo critical limit ({self.VIB_WARNING_MAX} mm/s)")
         elif vib > self.VIB_NORMAL_MAX:
             is_warning = True
-            reasons.append(f"Vibration Warning: {vib:.2f} mm/s exceeds ISO 10816-3 Zone C threshold ({self.VIB_NORMAL_MAX} mm/s)")
+            reasons.append(f"Vibration Warning: {vib:.2f} mm/s exceeds demo warning threshold ({self.VIB_NORMAL_MAX} mm/s)")
 
         # 3. Current evaluation
         if curr > self.CURR_WARNING_MAX:
             is_critical = True
-            reasons.append(f"Current Critical: {curr:.1f}A exceeds 130% FLA overload threshold ({self.CURR_WARNING_MAX}A)")
+            reasons.append(f"Current Critical: {curr:.1f}A exceeds demo critical threshold ({self.CURR_WARNING_MAX}A)")
         elif curr > self.CURR_NORMAL_MAX:
             is_warning = True
-            reasons.append(f"Current Warning: {curr:.1f}A exceeds 115% FLA service threshold ({self.CURR_NORMAL_MAX}A)")
+            reasons.append(f"Current Warning: {curr:.1f}A exceeds demo warning threshold ({self.CURR_NORMAL_MAX}A)")
 
         # Determine overall health status
         if is_critical:

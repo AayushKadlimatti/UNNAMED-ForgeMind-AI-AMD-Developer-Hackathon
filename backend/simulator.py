@@ -67,9 +67,9 @@ class ConveyorMotorSimulator:
             self.current_temperature = 81.4
             self.current_current = 18.9
         elif sc_lower == "warning":
-            self.current_vibration = 4.65
-            self.current_temperature = 78.5
-            self.current_current = 17.8
+            self.current_vibration = 3.6
+            self.current_temperature = 76.0
+            self.current_current = 18.4
         elif sc_lower == "normal":
             self.current_vibration = 2.10
             self.current_temperature = 65.0
@@ -116,10 +116,9 @@ class ConveyorMotorSimulator:
             # Scenario B: WARNING
             # Gradually increasing temperature towards ~78°C, vibration to ~3.8 mm/s, current to ~18.5 A
             # Simulates developing bearing race degradation and mechanical friction
-            progress = min(self.scenario_tick / 25.0, 1.0)
-            target_temp = self.base_temperature + progress * 13.0 + random.gauss(0, 0.6)
-            target_vib = self.base_vibration + progress * 1.8 + 0.15 * cycle_ripple + random.gauss(0, 0.12)
-            target_curr = self.base_current + progress * 3.4 + random.gauss(0, 0.25)
+            target_temp = 76.0 + random.uniform(-0.5, 0.5)
+            target_vib = 3.6 + 0.1 * cycle_ripple + random.uniform(-0.1, 0.1)
+            target_curr = 18.4 + random.uniform(-0.2, 0.2)
 
             self.current_temperature += (target_temp - self.current_temperature) * 0.10
             self.current_vibration += (target_vib - self.current_vibration) * 0.20
