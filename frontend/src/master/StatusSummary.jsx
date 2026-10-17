@@ -1,0 +1,5 @@
+const states = [['healthy', 'Healthy', 'Machines within demo thresholds'], ['warning', 'Warning', 'Machines requiring review'], ['critical', 'Critical', 'Machines above critical thresholds'], ['maintenance', 'Maintenance', 'Machines with open work orders']];
+
+export default function StatusSummary({ status, hasReading, maintenanceCount, selected, onSelect }) {
+  return <div className="master-summary" aria-label="Machine status summary">{states.map(([key, label, description], index) => <button key={key} className={`master-status-badge master-state-${key} master-enter ${selected === key ? 'is-selected' : ''}`} style={{ animationDelay: `${index * 100}ms` }} onClick={() => onSelect(key)} aria-pressed={selected === key}><div><span className={`master-status-dot ${key === 'critical' && status === 'critical' ? 'is-live' : ''}`} /><span>{label}</span></div><strong>{key === 'maintenance' ? maintenanceCount ?? '—' : !hasReading ? '—' : status === key ? 1 : 0}</strong><small>{description}</small></button>)}</div>;
+}
