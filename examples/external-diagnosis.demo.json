@@ -1,0 +1,16 @@
+{
+  "external_id": "synthetic-team-demo-001",
+  "diagnosis": {
+    "machine_id": "CONV-MTR-01",
+    "data_source": "DEMO",
+    "observed_at": "2026-10-17T09:00:00Z",
+    "is_anomaly": true,
+    "readings": [
+      {"sensor": "vibration", "value": 3.8, "unit": "mm/s RMS", "triggered": true},
+      {"sensor": "temperature", "value": 78.0, "unit": "°C", "triggered": true},
+      {"sensor": "current", "value": 16.0, "unit": "A", "triggered": false}
+    ],
+    "diagnosis": "SYNTHETIC DEMO ONLY: external teammate assessment suggests reviewing bearing vibration and cooling records. Not validated against a real machine. Qualified human review required.",
+    "manual_query": "bearing vibration cooling temperature"
+  }
+}

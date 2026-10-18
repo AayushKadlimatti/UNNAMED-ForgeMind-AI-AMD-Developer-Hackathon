@@ -1,0 +1,912 @@
+--- github-main/.env.example
++++ arena-retained/.env.example
+@@ -4,3 +4,11 @@
+ AMD_HARDWARE=
+ FORGEMIND_ADMIN_TOKEN=
+ FORGEMIND_TECHNICIAN_TOKEN=
++
++# Optional local-demo security settings. Restart after changes.
++FORGEMIND_CORS_ORIGINS=http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8001
++# Keep false for local HTTP. HTTPS hosting requires true and a security review.
++FORGEMIND_COOKIE_SECURE=false
++# Optional persistent storage overrides (do not put important data on ephemeral hosting):
++# FORGEMIND_EVENT_DB=/persistent/forgemind/events.sqlite3
++# FORGEMIND_WORKFLOW_DATABASE_URL=sqlite:////persistent/forgemind/workflow.sqlite3
+--- github-main/INTEGRATION.md
++++ arena-retained/INTEGRATION.md
+@@ -1,4 +1,6 @@
+ # ForgeMind integrated local demo
++
++> **Current working-copy update:** see [START_HERE.md](START_HERE.md) for no-AMD-key startup, changed permissions and the external-intake contract; see [INTEGRATION_RESULTS.md](INTEGRATION_RESULTS.md) for newly reproduced checks. Live/provider/browser measurements below are historical repository records, not this handoff's verification.
+ 
+ Integration target: Joshua's `frontend/`, GitHub main at `56c7608`, with the ZIP's Arena maintenance workflow and the real AMD adapter developed in this workspace.
+ 
+@@ -47,7 +49,7 @@
+ 
+ - `frontend/src/ConnectedApp.jsx` is the active React entry, using the user-approved master design, Cabinet Grotesk/JetBrains Mono, responsive status badges, detailed telemetry charts, incident cards and a keyboard-accessible diagnostics modal. The previous sample pages remain in the source for reference but are not mounted.
+ - `backend/integrated_server.py` is the active server. Both `backend.main_integrated:app` and `backend.main:app` point to it.
+-- `backend/intelligence/amd_engine.py` is the validated real-provider adapter; `backend/amd_bridge.py` maps its JSON to the dashboard contract.
++- `backend/intelligence/amd_engine.py` contains the real-provider request adapter (live execution was not revalidated in this handoff); `backend/amd_bridge.py` maps its JSON to the dashboard contract.
+ - The simulator's machine is `CONV-MTR-01`. Its vibration is **velocity RMS in mm/s**, not acceleration in g. The original `conveyor-01` profile cannot be directly reused; the integrated demo uses the shared simulator's illustrative thresholds with finite-value validation. Neither profile is calibrated or standards-certified.
+ - `backend/arena_workflow/` comes from the supplied ZIP. Its task routes, role checks, lifecycle, sample manual search, and audit trail are mounted here.
+ - Diagnosis-linked approvals are idempotent: one work order per diagnosis, including after restart, with the diagnosis ID recorded in the workflow audit transaction.
+--- github-main/README.md
++++ arena-retained/README.md
+@@ -1,4 +1,6 @@
+ # ForgeMind AI
++
++> **Separate safe-integration handoff:** begin with [START_HERE.md](START_HERE.md). Current changes and locally reproduced results are in [INTEGRATION_RESULTS.md](INTEGRATION_RESULTS.md). Earlier live-provider/browser measurements below are inherited repository history, not re-run in this handoff. No credentials, deployment, or GitHub push are included.
+ 
+ An industrial maintenance investigation workspace for **AMD Hackathon Track 1: Intelligent Industry**. ForgeMind turns a conveyor's abnormal sensor readings into an explainable alert, a real AMD-assisted assessment, and a human-approved inspection work order.
+ 
+--- github-main/backend/arena_workflow/database.py
++++ arena-retained/backend/arena_workflow/database.py
+@@ -21,7 +21,7 @@
+     if parsed.database and parsed.database != ":memory:":
+         Path(parsed.database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+     options = {"poolclass": StaticPool} if parsed.database in (None, "", ":memory:") else {}
+-    engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 10}, **options)
++    engine = create_engine(url, hide_parameters=True, connect_args={"check_same_thread": False, "timeout": 10}, **options)
+ 
+     @event.listens_for(engine, "connect")
+     def configure_sqlite(connection, _):
+--- github-main/backend/arena_workflow/integration.py
++++ arena-retained/backend/arena_workflow/integration.py
+@@ -1,43 +1,87 @@
+-"""Integration boundary ONLY: does not import or reimplement detector.py/amd_engine.py.
++"""External-result adapter. Never calls or replaces a detector or AMD engine.
+ 
+-Teammate 2 sends detector/diagnosis output here; frontend consumes standard tasks.
+-Submission is advisory and explicitly requests a work order (optional).
++Results are unverified caller assertions. Work orders require separate human approval.
+ """
+-from fastapi import APIRouter, Depends, HTTPException
++import hashlib
++import json
++from datetime import datetime, timezone
++
++from fastapi import APIRouter, Depends, HTTPException, Request
+ from sqlalchemy.orm import Session
+ 
+ from .database import get_db
+-from .models import MachineStatus
+ from .rag_engine import search_manual
+-from .schemas import DiagnosisRequest, DiagnosisResponse, TaskCreate
+-from .security_routes import User, commit_changes, record_audit, require_admin
+-from .workflow_routes import add_task, find_machine
++from .schemas import DiagnosisRequest, DiagnosisResponse
++from .security_routes import User, require_admin
++from .workflow_routes import find_machine
+ 
+-router = APIRouter(prefix="/api/v1/integration", tags=["Teammate integration"])
++router = APIRouter(prefix='/api/v1/integration', tags=['Teammate integration'])
+ 
+ 
+-@router.post("/diagnoses", response_model=DiagnosisResponse)
+-def accept_diagnosis(payload: DiagnosisRequest, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+-    diagnosis = payload.diagnosis
+-    machine = find_machine(db, diagnosis.machine_id)
+-    if diagnosis.is_anomaly and not any(reading.triggered for reading in diagnosis.readings):
+-        raise HTTPException(status_code=422, detail="An anomaly must identify at least one triggered sensor reading.")
+-    if not diagnosis.is_anomaly and (payload.task is not None or any(r.triggered for r in diagnosis.readings)):
+-        raise HTTPException(status_code=422, detail="A non-anomaly must not have triggered readings or request an anomaly work order.")
+-    manual = search_manual(diagnosis.manual_query)
+-    record_audit(db, user, "MANUAL_SEARCHED", {"matched": manual["matched"],
+-                 "excerpt_ids": [m["excerpt_id"] for m in manual["matches"]], "source": "integration"})
+-    task = None
+-    if diagnosis.is_anomaly:
+-        old = machine.status
+-        machine.status = MachineStatus.CRITICAL
+-        record_audit(db, user, "MACHINE_STATUS_CHANGED", {"machine_id": machine.id,
+-                     "from": old.value, "to": "CRITICAL", "source": "reported_anomaly"})
++def dashboard_record(payload: DiagnosisRequest):
++    """Preserve original units; only map exact known units to the dashboard's channels."""
++    source = payload.diagnosis
++    submitted = source.model_dump(mode='json')
++    fingerprint = hashlib.sha256(json.dumps(submitted, sort_keys=True).encode()).hexdigest()
++    identifier = 'DIAG-EXT-' + hashlib.sha256((source.machine_id + ':' + payload.external_id).encode()).hexdigest()
++    now = datetime.now(timezone.utc).isoformat()
++    manual = search_manual(source.manual_query)
++    snapshot = {'machine_id': source.machine_id, 'timestamp': source.observed_at.astimezone(timezone.utc).isoformat(),
++                'health_status': 'CRITICAL' if source.is_anomaly else 'HEALTHY',
++                'anomaly_reasons': [f'Caller flagged {r.sensor} ({r.value} {r.unit})' for r in source.readings if r.triggered],
++                'readings': [r.model_dump() for r in source.readings],
++                'is_simulated': source.data_source.value == 'DEMO', 'thresholds_validated': False}
++    channels = {
++        'temperature': ({'temperature', 'winding_temperature'}, {'c', '°c', 'degc'}),
++        'vibration': ({'vibration', 'vibration_mm_s'}, {'mm/s', 'mm/s rms'}),
++        'current': ({'current', 'current_amp'}, {'a', 'amp', 'amps'}),
++    }
++    for field, (names, units) in channels.items():
++        compatible = [r for r in source.readings if r.sensor.lower() in names and r.unit.lower() in units]
++        if len(compatible) == 1:
++            snapshot[field] = compatible[0].value
++    references = [{'excerpt_id': m['excerpt_id'], 'title': 'SAMPLE — ' + m['citation'],
++                   'source': manual['disclaimer'], 'excerpt': m['content'], 'verification': 'sample'}
++                  for m in manual['matches']]
++    return {
++        'id': identifier, 'machine_id': source.machine_id, 'timestamp': now, 'completed_at': now,
++        'status': 'completed', 'origin': 'external', 'external_is_anomaly': source.is_anomaly,
++        'submission_hash': fingerprint, 'telemetry_snapshot': snapshot,
++        'data_source': 'synthetic' if source.data_source.value == 'DEMO' else 'sensor',
++        'context_id': 'external:' + identifier, 'requires_human_review': True, 'confidence': None,
++        'message': 'External, unvalidated submission. No AMD request or hardware execution was performed by this adapter.',
++        'primaryHypothesis': {'title': 'External assessment — qualified review required', 'description': source.diagnosis},
++        'alternatives': [], 'remediationSteps': [], 'inference': None,
++        'limitations': ['External sensor/diagnosis claims have not been independently verified.',
++                        'Sample manual excerpts are not approved OEM maintenance instructions.',
++                        'This snapshot is separate from the synthetic monitoring context; review it explicitly before approval.'],
++        'references': references, 'trend_readings': 0, 'context_readings': [],
++    }, manual
++
++
++@router.post('/diagnoses', response_model=DiagnosisResponse)
++async def accept_diagnosis(payload: DiagnosisRequest, request: Request,
++                           user: User = Depends(require_admin), db: Session = Depends(get_db)):
++    source = payload.diagnosis
++    machine = find_machine(db, source.machine_id)
++    if source.machine_id != request.app.state.simulator.machine_id:
++        raise HTTPException(409, 'This dashboard supports only its configured demo machine')
+     if payload.task is not None:
+-        task = add_task(db, TaskCreate(machine_id=machine.id, **payload.task.model_dump()), user)
+-    record_audit(db, user, "DIAGNOSIS_RECEIVED", {"machine_id": machine.id,
+-                 "data_source": diagnosis.data_source.value, "is_anomaly": diagnosis.is_anomaly,
+-                 "task_id": task.id if task else None})
+-    commit_changes(db)
+-    return {"diagnosis": diagnosis, "manual": manual, "task": task, "machine": machine,
+-            "advisory": "Unvalidated teammate-supplied diagnosis, not a verified failure prediction. Sample manual instructions are not approved maintenance guidance. A human must review; no equipment is controlled. DEMO readings are synthetic; REAL is a caller assertion, not independently verified."}
++        raise HTTPException(422, 'Direct task creation is disabled for external intake. Omit task, review the saved investigation, then use its work-order approval endpoint.')
++    triggered = any(r.triggered for r in source.readings)
++    if source.is_anomaly != triggered:
++        raise HTTPException(422, 'is_anomaly must agree with whether at least one reading is triggered')
++    record, manual = dashboard_record(payload)
++    async with request.app.state.diagnosis_lock:
++        pending = request.app.state.inference_task
++        if pending and not pending.done():
++            raise HTTPException(409, 'An AMD request is in progress; retry external intake after it finishes')
++        stored, _ = request.app.state.store.save_audited('diagnosis', record, db, user, 'DIAGNOSIS_RECEIVED',
++            {'diagnosis_id': record['id'], 'machine_id': machine.id, 'origin': 'external',
++             'data_source': source.data_source.value, 'is_anomaly': source.is_anomaly},
++            immutable=True, critical_machine=machine.id if source.is_anomaly else None,
++            extra_audits=[('MANUAL_SEARCHED', {'source': 'integration', 'matched': manual['matched'],
++                                             'excerpt_ids': [m['excerpt_id'] for m in manual['matches']]})])
++    db.refresh(machine)
++    return {'diagnosis_id': stored['id'], 'diagnosis': source, 'manual': manual, 'task': None, 'machine': machine,
++            'advisory': 'Saved to dashboard history as an external, unvalidated assessment. No AMD execution or failure-prediction accuracy is claimed. DEMO is synthetic; REAL is a caller assertion. No work order was created. Review evidence and separately approve an inspection. Sample manual content is not approved maintenance guidance.'}
+--- github-main/backend/arena_workflow/schemas.py
++++ arena-retained/backend/arena_workflow/schemas.py
+@@ -126,11 +126,14 @@
+ 
+ 
+ class DiagnosisRequest(Schema):
++    external_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100,
++                                               pattern=r"^[A-Za-z0-9_-]+$")]
+     diagnosis: DiagnosisPayload
+     task: IntegrationTaskRequest | None = None
+ 
+ 
+ class DiagnosisResponse(Schema):
++    diagnosis_id: str
+     diagnosis: DiagnosisPayload
+     manual: ManualSearchResponse
+     task: TaskResponse | None
+--- github-main/backend/arena_workflow/security_routes.py
++++ arena-retained/backend/arena_workflow/security_routes.py
+@@ -15,6 +15,7 @@
+ from sqlalchemy.exc import IntegrityError
+ from sqlalchemy.orm import Session
+ 
++from ..configuration import trusted_origins
+ from .database import get_db
+ from .models import AuditLog
+ from .schemas import AuditLogResponse, ErrorResponse
+@@ -68,19 +69,27 @@
+         raise HTTPException(status_code=503, detail="Demo authentication is not configured. See README.")
+     token = credentials.credentials if credentials is not None else request.cookies.get('forgemind_session')
+     if token:
+-        if credentials is None and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+-            origin = request.headers.get('origin')
+-            if origin and origin not in ('http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8001'):
+-                raise HTTPException(403, 'Session requests must originate from the local app')
+         digest = hashlib.sha256(token.encode()).digest()
+         for expected, user in configured:
+             if hmac.compare_digest(digest, expected):
++                if credentials is None:
++                    check_session_origin(request, db, user)
+                 return user
+     record_audit(db, User("anonymous", "anonymous"), "AUTHENTICATION_DENIED",
+                  {"reason": "missing_or_invalid_credentials"})
+     commit_changes(db)  # persist denied attempts even though request raises below
+     raise HTTPException(status_code=401, detail="Valid demo bearer token required.",
+                         headers={"WWW-Authenticate": "Bearer"})
++
++
++def check_session_origin(request: Request, db: Session, user: User):
++    """SameSite cookie plus an origin check for browser writes; no origin value is logged."""
++    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
++        origin = request.headers.get('origin')
++        if origin and origin not in trusted_origins():
++            record_audit(db, user, 'ACCESS_DENIED', {'reason': 'untrusted_session_origin'})
++            commit_changes(db)
++            raise HTTPException(403, 'Session request origin is not allowed')
+ 
+ 
+ def require_admin(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+--- github-main/backend/documents.py
++++ arena-retained/backend/documents.py
+@@ -3,9 +3,12 @@
+ from uuid import uuid4
+ 
+ from fastapi import APIRouter, Depends, Query, Request
+-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
++from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
++from sqlalchemy.orm import Session
+ 
+-from .arena_workflow.security_routes import User, get_current_user, require_admin
++from .arena_workflow.database import get_db
++
++from .arena_workflow.security_routes import User, get_current_user, require_admin, record_audit, commit_changes
+ 
+ router = APIRouter(prefix='/api/documents', tags=['Maintenance references'])
+ 
+@@ -16,6 +19,13 @@
+     source: str = Field(min_length=1, max_length=500, description='Document title, revision, section or page')
+     source_url: HttpUrl | None = None
+     text: str = Field(min_length=20, max_length=20000)
++
++    @field_validator('source_url')
++    @classmethod
++    def no_embedded_credentials(cls, value):
++        if value and (value.username or value.password or value.query or value.fragment):
++            raise ValueError('Use a public source URL without credentials, query secrets, or fragments')
++        return value
+ 
+ 
+ def search(store, query, limit=5):
+@@ -34,20 +44,27 @@
+ 
+ 
+ @router.post('', status_code=201)
+-def add_document(payload: DocumentInput, request: Request, user: User = Depends(require_admin)):
++def add_document(payload: DocumentInput, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+     from .integrated_server import now
+     result = {**payload.model_dump(mode='json'), 'id': 'DOC-' + uuid4().hex,
+               'created_at': now(), 'verification': 'user_supplied'}
+-    request.app.state.store.save('document', result)
++    request.app.state.store.save_audited('document', result, db, user, 'REFERENCE_ADDED',
++                                      {'document_id': result['id'], 'verification': 'user_supplied'})
+     return result
+ 
+ 
+ @router.get('')
+-def documents(request: Request, user: User = Depends(get_current_user)):
++def documents(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
++    record_audit(db, user, 'REFERENCE_LIBRARY_VIEWED', {})
++    commit_changes(db)
+     return request.app.state.store.list('document', 100)
+ 
+ 
+ @router.get('/search')
+-def search_documents(request: Request, q: str = Query('', max_length=1000), user: User = Depends(get_current_user)):
+-    return {'query': q, 'matches': search(request.app.state.store, q),
++def search_documents(request: Request, q: str = Query('', max_length=1000), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
++    matches = search(request.app.state.store, q)
++    record_audit(db, user, 'REFERENCE_SEARCHED', {'matched': bool(matches),
++                 'excerpt_ids': [match['excerpt_id'] for match in matches]})
++    commit_changes(db)
++    return {'query': q, 'matches': matches,
+             'disclaimer': 'User-supplied reference excerpts, not independently verified OEM instructions.'}
+--- github-main/backend/integrated_server.py
++++ arena-retained/backend/integrated_server.py
+@@ -12,9 +12,12 @@
+ from dotenv import load_dotenv
+ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+ from fastapi.middleware.cors import CORSMiddleware
+-from pydantic import BaseModel, Field
++from fastapi.exceptions import RequestValidationError
++from fastapi.responses import JSONResponse
++from pydantic import BaseModel, ConfigDict, Field
+ from sqlalchemy.orm import Session
+ 
++from .configuration import trusted_origins, secure_cookie
+ from .simulator import ConveyorMotorSimulator
+ from .anomaly_detector import AnomalyDetectionEngine
+ from .amd_bridge import diagnose, amd_configured, AMDUnavailable
+@@ -137,7 +140,15 @@
+ 
+ 
+ app = FastAPI(title='ForgeMind integrated demo', version='3.0.0', lifespan=lifespan)
+-app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173', 'http://127.0.0.1:5173'], allow_credentials=True, allow_methods=['*'], allow_headers=['Content-Type', 'Authorization'])
++@app.exception_handler(RequestValidationError)
++async def safe_validation_error(request: Request, exc: RequestValidationError):
++    # Keep FastAPI's normal detail-array shape without reflecting rejected body data or context.
++    return JSONResponse(status_code=422, content={'detail': [
++        {key: error[key] for key in ('type', 'loc', 'msg') if key in error} for error in exc.errors()
++    ]})
++
++
++app.add_middleware(CORSMiddleware, allow_origins=list(trusted_origins()), allow_credentials=True, allow_methods=['*'], allow_headers=['Content-Type', 'Authorization'])
+ app.include_router(workflow_router)
+ app.include_router(security_router)
+ app.include_router(integration_router)
+@@ -161,13 +172,13 @@
+     if not authorization.startswith('Bearer '):
+         raise HTTPException(401, 'Enter a demo access token to connect')
+     response.set_cookie('forgemind_session', authorization[7:], httponly=True,
+-                        samesite='strict', max_age=8 * 3600, secure=False, path='/')
++                        samesite='strict', max_age=8 * 3600, secure=secure_cookie(), path='/')
+     return {'username': user.username, 'role': user.role}
+ 
+ 
+ @app.delete('/api/session')
+-def disconnect_session(response: Response):
+-    response.delete_cookie('forgemind_session', path='/', httponly=True, samesite='strict')
++def disconnect_session(response: Response, user: User = Depends(get_current_user)):
++    response.delete_cookie('forgemind_session', path='/', httponly=True, samesite='strict', secure=secure_cookie())
+     return {'disconnected': True}
+ 
+ 
+@@ -182,24 +193,29 @@
+ 
+ 
+ class ScenarioRequest(BaseModel):
+-    scenario: str
++    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
++    scenario: str = Field(min_length=1, max_length=20)
+ 
+ 
+ @app.post('/api/simulator/scenario')
+-async def scenario(payload: ScenarioRequest, request: Request):
+-    try:
+-        request.app.state.simulator.set_scenario(payload.scenario)
+-    except ValueError:
+-        raise HTTPException(422, 'Use normal, warning, critical, abnormal, or recovery') from None
++async def scenario(payload: ScenarioRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
++    selected = payload.scenario.lower()
++    if selected not in ('normal', 'warning', 'critical', 'abnormal', 'recovery'):
++        raise HTTPException(422, 'Use normal, warning, critical, abnormal, or recovery')
++    record_audit(db, user, 'SIMULATOR_SCENARIO_CHANGED', {'scenario': 'critical' if selected == 'abnormal' else selected})
++    commit_changes(db)
++    request.app.state.simulator.set_scenario(selected)
+     request.app.state.context_id = str(uuid4())
+     await tick(request.app)
+     return simulator_status(request)
+ 
+ 
+ @app.post('/api/simulator/{action}')
+-async def control(action: str, request: Request):
++async def control(action: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+     if action not in ('start', 'stop', 'reset'):
+         raise HTTPException(404, 'Unknown simulator action')
++    record_audit(db, user, 'SIMULATOR_CONTROLLED', {'action': action})
++    commit_changes(db)
+     getattr(request.app.state.simulator, action)()
+     if action == 'reset':
+         request.app.state.context_id = str(uuid4())
+@@ -221,25 +237,26 @@
+ 
+ 
+ @app.patch('/api/alerts/{alert_id}/acknowledge')
+-def acknowledge(alert_id: str, request: Request, user: User = Depends(get_current_user)):
++def acknowledge(alert_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+     alert = request.app.state.store.get(alert_id)
+     if not alert or not alert_id.startswith('ALR-'):
+         raise HTTPException(404, 'Alert not found')
+     if not alert.get('acknowledged'):
+         alert.update(acknowledged=True, acknowledged_at=now(), acknowledged_by=user.username)
+-        request.app.state.store.save('alert', alert)
++        request.app.state.store.save_audited('alert', alert, db, user, 'INCIDENT_ACKNOWLEDGED',
++                                          {'alert_id': alert_id}, replace_existing=True)
+     return alert
+ 
+ 
+ @app.get('/api/diagnostics/latest')
+-def latest_diagnosis(request: Request, machine_id: str = MACHINE):
++def latest_diagnosis(request: Request, machine_id: str = MACHINE, user: User = Depends(get_current_user)):
+     require_machine(machine_id)
+     results = request.app.state.store.list('diagnosis', 1)
+     return {'diagnostic': results[0] if results else None, 'status': results[0]['status'] if results else 'not_requested'}
+ 
+ 
+ @app.get('/api/diagnostics/history')
+-def diagnosis_history(request: Request, limit: int = Query(20, ge=1, le=100)):
++def diagnosis_history(request: Request, limit: int = Query(20, ge=1, le=100), user: User = Depends(get_current_user)):
+     return request.app.state.store.list('diagnosis', limit)
+ 
+ 
+@@ -257,7 +274,8 @@
+ 
+ 
+ @app.post('/api/diagnostics/request', status_code=202)
+-async def request_diagnosis(request: Request, user: User = Depends(require_admin)):
++async def request_diagnosis(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
++    # External intake must not hide an in-flight AMD request in the dashboard.
+     async with request.app.state.diagnosis_lock:
+         state = request.app.state
+         if state.inference_task and not state.inference_task.done():
+@@ -270,18 +288,21 @@
+         if time.monotonic() - state.last_requested < 45:
+             remaining = max(1, int(45 - (time.monotonic() - state.last_requested)))
+             raise HTTPException(429, f'Wait {remaining} seconds before retrying AMD', headers={'Retry-After': str(remaining)})
+-        state.last_requested = time.monotonic()
+         readings = list(reversed(state.store.list('telemetry', 20)))
+         references = search_references(state.store, 'conveyor motor vibration temperature current bearing cooling maintenance')
+         context = {'recent_readings': [{key: row.get(key) for key in ('timestamp', 'temperature', 'vibration', 'current', 'health_status')} for row in readings],
+                    'references': references, 'reference_disclaimer': 'User-supplied; not independently verified OEM instructions'}
+         record = {'id': 'DIAG-' + uuid4().hex, 'machine_id': MACHINE, 'timestamp': now(),
+-                  'status': 'pending', 'message': 'Waiting for AMD', 'confidence': None,
++                  'status': 'pending', 'origin': 'amd', 'message': 'Waiting for AMD', 'confidence': None,
+                   'telemetry_snapshot': reading, 'data_source': 'synthetic', 'requires_human_review': True,
+                   'primaryHypothesis': None, 'alternatives': [], 'remediationSteps': [], 'inference': None,
+                   'context_id': state.context_id, 'references': references, 'trend_readings': len(readings),
+                   'context_readings': context['recent_readings']}
+-        state.store.save('diagnosis', record)
++        state.store.save_audited('diagnosis', record, db, user, 'DIAGNOSIS_REQUESTED',
++            {'diagnosis_id': record['id'], 'machine_id': MACHINE, 'origin': 'amd'},
++            extra_audits=[('REFERENCE_SEARCHED', {'source': 'amd_context', 'matched': bool(references),
++                                                'excerpt_ids': [r['excerpt_id'] for r in references]})])
++        state.last_requested = time.monotonic()
+         state.inference_task = asyncio.create_task(infer(request.app, record, {**reading, 'analysis_context': context}))
+         return {'diagnostic': record, 'status': 'pending'}
+ 
+@@ -295,8 +316,10 @@
+                             user: User = Depends(require_admin), db: Session = Depends(get_db)):
+     async with request.app.state.work_order_lock:
+         record = request.app.state.store.get(diagnosis_id)
+-        if not record or record.get('status') != 'completed':
+-            raise HTTPException(409, 'A completed AMD diagnosis is required before approving an inspection task')
++        if not diagnosis_id.startswith('DIAG-') or not record or record.get('status') != 'completed':
++            raise HTTPException(409, 'A completed diagnosis is required before approving an inspection task')
++        if record.get('external_is_anomaly') is False:
++            raise HTTPException(409, 'A non-anomaly external report cannot approve an anomaly work order')
+         for log in db.query(AuditLog).filter(AuditLog.action == 'DIAGNOSIS_WORK_ORDER_APPROVED').all():
+             details = json.loads(log.details)
+             if details['diagnosis_id'] == diagnosis_id:
+@@ -307,7 +330,7 @@
+         if historical and not payload.reviewed_historical_context:
+             raise HTTPException(409, 'Monitoring context changed. Review the saved evidence and explicitly confirm historical context before approval.')
+         task = add_task(db, TaskCreate(machine_id=MACHINE, **payload.model_dump(exclude={'reviewed_historical_context'})), user)
+-        record_audit(db, user, 'DIAGNOSIS_WORK_ORDER_APPROVED', {'diagnosis_id': diagnosis_id, 'task_id': task.id, 'data_source': 'synthetic',
++        record_audit(db, user, 'DIAGNOSIS_WORK_ORDER_APPROVED', {'diagnosis_id': diagnosis_id, 'task_id': task.id, 'data_source': record.get('data_source', 'synthetic'), 'origin': record.get('origin', 'amd'),
+                     'historical_context': historical, 'reviewed_historical_context': payload.reviewed_historical_context})
+         commit_changes(db)
+         record['work_order_id'] = task.id
+@@ -316,5 +339,9 @@
+ 
+ 
+ @app.post('/api/v1/manual/search', response_model=ManualSearchResponse)
+-def manual_search(payload: ManualSearchRequest, user: User = Depends(get_current_user)):
+-    return search_manual(payload.query)
++def manual_search(payload: ManualSearchRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
++    result = search_manual(payload.query)
++    record_audit(db, user, 'MANUAL_SEARCHED', {'source': 'api', 'matched': result['matched'],
++                 'excerpt_ids': [match['excerpt_id'] for match in result['matches']]})
++    commit_changes(db)
++    return result
+--- github-main/backend/store.py
++++ arena-retained/backend/store.py
+@@ -39,3 +39,49 @@
+         with self.db() as db:
+             rows = db.execute('SELECT payload FROM events WHERE kind=? ORDER BY seq DESC LIMIT ?', (kind, limit)).fetchall()
+         return [json.loads(row[0]) for row in rows]
++
++    def save_audited(self, kind, payload, workflow_db, user, action, details, *, immutable=False, critical_machine=None, replace_existing=False, extra_audits=()):
++        """Save a reference/external report AND its audit using one attached-SQLite transaction.
++
++        No new tables: reuses the existing events and workflow audit_logs tables.
++        Both databases must be file-backed SQLite on persistent local storage.
++        immutable makes external_id retries return the original without a second audit.
++        This does not change the existing AMD work-order cross-store recovery logic.
++        """
++        from datetime import datetime, timezone
++        from fastapi import HTTPException
++
++        workflow_path = workflow_db.get_bind().url.database
++        if not workflow_path or workflow_path == ':memory:':
++            raise HTTPException(503, 'Audited event storage requires file-backed SQLite databases')
++        if Path(workflow_path).resolve() == Path(self.path).resolve():
++            raise HTTPException(503, 'Configure separate event and workflow SQLite files')
++        timestamp = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(sep=' ')
++        try:
++            with self.db() as connection:
++                connection.execute('ATTACH DATABASE ? AS workflow_audit', (str(Path(workflow_path).resolve()),))
++                connection.execute('BEGIN IMMEDIATE')
++                if immutable:
++                    row = connection.execute('SELECT payload FROM events WHERE id=?', (payload['id'],)).fetchone()
++                    if row:
++                        existing = json.loads(row[0])
++                        if existing.get('submission_hash') != payload.get('submission_hash'):
++                            raise HTTPException(409, 'external_id already exists with different diagnosis data')
++                        return existing, False
++                statement = 'INSERT INTO events(kind,id,payload) VALUES (?,?,?)'
++                if replace_existing:
++                    statement += ' ON CONFLICT(id) DO UPDATE SET payload=excluded.payload'
++                connection.execute(statement, (kind, payload['id'], json.dumps(payload, allow_nan=False)))
++                def audit(event, metadata):
++                    connection.execute('INSERT INTO workflow_audit.audit_logs(username,action,details,timestamp) VALUES (?,?,?,?)',
++                                       (user.username, event, json.dumps(metadata, sort_keys=True), timestamp))
++                audit(action, details)
++                if critical_machine:
++                    connection.execute("UPDATE workflow_audit.machines SET status='CRITICAL' WHERE id=?", (critical_machine,))
++                    audit('MACHINE_STATUS_CHANGED', {'machine_id': critical_machine, 'to': 'CRITICAL', 'source': 'external_report'})
++                for event, metadata in extra_audits:
++                    audit(event, metadata)
++            return payload, True
++        except sqlite3.Error:
++            # Do not leak database paths, SQL, submitted text, or credential values.
++            raise HTTPException(503, 'Audited storage failed; no event was saved. Retry after checking local storage.') from None
+--- github-main/frontend/src/ConnectedApp.jsx
++++ arena-retained/frontend/src/ConnectedApp.jsx
+@@ -1,4 +1,4 @@
+-import { useCallback, useEffect, useState } from 'react';
++import { useCallback, useEffect, useRef, useState } from 'react';
+ import ConsoleShell from './master/ConsoleShell';
+ import MasterDashboard from './master/Dashboard';
+ import DiagnosticsModal from './master/DiagnosticsModal';
+@@ -28,7 +28,9 @@
+   const [noticeError, setNoticeError] = useState(false);
+   const [busy, setBusy] = useState(false);
+   const [credential, setCredential] = useState('');
+-  const [user, setUser] = useState(null);
++  const [user, setUserState] = useState(null);
++  const activeUser = useRef(null);
++  const setUser = useCallback(value => { activeUser.current = value; setUserState(value); }, []);
+   const [tasks, setTasks] = useState([]);
+   const [taskError, setTaskError] = useState('');
+   const [tasksLoading, setTasksLoading] = useState(false);
+@@ -42,14 +44,16 @@
+   const [taskTitle, setTaskTitle] = useState('Review conveyor anomaly and plan a qualified inspection');
+ 
+   const refresh = useCallback(async () => {
++    if (activeUser.current !== user) return;
+     try {
+       const [telemetry, status, alerts, diagnosis, history] = await Promise.all([
+-        api('/api/telemetry/history?limit=300'), api('/api/simulator/status'), api('/api/alerts'), api('/api/diagnostics/latest'), api('/api/diagnostics/history'),
++        api('/api/telemetry/history?limit=300'), api('/api/simulator/status'), api('/api/alerts'), user ? api('/api/diagnostics/latest') : Promise.resolve({ diagnostic: null }), user ? api('/api/diagnostics/history') : Promise.resolve([]),
+       ]);
++      if (activeUser.current !== user) return;
+       setData({ history: telemetry.history, status, alerts: alerts.alerts, diagnostic: diagnosis.diagnostic, diagnoses: history });
+       setError('');
+-    } catch (err) { setError(err.message); }
+-  }, []);
++    } catch (err) { if (activeUser.current === user) setError(err.message); }
++  }, [user]);
+ 
+   useEffect(() => {
+     let active = true;
+@@ -63,9 +67,11 @@
+   }, [refresh]);
+ 
+   const loadTasks = useCallback(async () => {
++    const requester = activeUser.current;
++    if (!requester) return;
+     setTasksLoading(true);
+-    try { setTasks(await api('/api/v1/tasks?machine_id=CONV-MTR-01')); setTaskError(''); }
+-    catch (err) { setTaskError(err.message); }
++    try { const rows = await api('/api/v1/tasks?machine_id=CONV-MTR-01'); if (activeUser.current === requester) { setTasks(rows); setTaskError(''); } }
++    catch (err) { if (activeUser.current === requester) setTaskError(err.message); }
+     finally { setTasksLoading(false); }
+   }, []);
+   useEffect(() => {
+@@ -74,13 +80,13 @@
+       if (active) { setUser(current); loadTasks(); }
+     }).catch(() => {});
+     return () => { active = false; };
+-  }, [loadTasks]);
++  }, [loadTasks, setUser]);
+ 
+   useEffect(() => {
+-    const expire = () => { setUser(null); setTasks([]); setToken(''); };
++    const expire = () => { setUser(null); setTasks([]); setAudit(null); setSelectedDiagnosis(null); setDiagnosticOpen(false); setData(previous => previous ? { ...previous, diagnostic: null, diagnoses: [] } : previous); setToken(''); };
+     window.addEventListener('forgemind-session-expired', expire);
+     return () => window.removeEventListener('forgemind-session-expired', expire);
+-  }, []);
++  }, [setUser]);
+ 
+   function navigate(next) {
+     setDiagnosticOpen(false);
+@@ -135,6 +141,7 @@
+       {data?.diagnoses.length > 0 && <label className="block text-sm">Investigation history<select className={input} value={selectedDiagnosis || ''} onChange={e => setSelectedDiagnosis(e.target.value || null)}><option value="">Latest investigation</option>{data.diagnoses.map(item => <option key={item.id} value={item.id}>{new Date(item.timestamp).toLocaleString()} · {item.status}</option>)}</select></label>}
+       {!diagnosis && <p className="text-gray-400">No diagnosis requested. Select an abnormal scenario, then request analysis.</p>}
+       {diagnosis && <><p className="text-sm">Status: <strong>{diagnosis.status}</strong> · Recorded {new Date(diagnosis.timestamp).toLocaleString()}</p>
++        {diagnosis.origin === 'external' && <p className="text-[#F59E0B] text-sm">EXTERNAL ASSESSMENT · {diagnosis.data_source === 'sensor' ? 'REAL measurements claimed by caller; not verified' : 'DEMO / synthetic data'} · Not an AMD result. Completed means received and saved, not validated.</p>}
+         {stale && <p className="text-[#F59E0B] text-sm">Historical investigation: the monitoring context has changed. Review its saved sensor snapshot before acting.</p>}
+         {diagnosis.message && <p role="status" className="text-[#F3F4F6]">{diagnosis.message}</p>}
+         {diagnosis.status === 'pending' && <div className="master-pending" role="status"><span className="master-pending-indicator" /><div><strong>AMD is reviewing the captured evidence</strong><p>You can close this panel. Monitoring continues, and the result is saved automatically. The request has a 90-second deadline.</p></div></div>}
+@@ -144,10 +151,10 @@
+           <p className="master-hypothesis">{diagnosis.primaryHypothesis?.description}</p>
+           <h3 className="font-semibold">Possible causes</h3><ul className="master-cause-grid">{diagnosis.alternatives.map((cause, i) => <li key={i}>{cause.title}</li>)}</ul>
+           <h3 className="font-semibold">Suggested inspections for qualified review</h3><ul className="master-steps">{diagnosis.remediationSteps.map((step, i) => <li key={i}>{step}</li>)}</ul>
+-          <p className="text-[#F59E0B] text-sm">Unvalidated suggestions, not approved repair instructions. Human review is required. Reference excerpts are user-supplied and not independently verified.</p>
++          <p className="text-[#F59E0B] text-sm">Unvalidated suggestions, not approved repair instructions. Human review is required. Reference excerpts are SAMPLE or user-supplied and not independently verified.</p>
+           <ul className="list-disc pl-5 space-y-1 text-xs text-gray-400">{diagnosis.limitations?.map((item, i) => <li key={i}>{item}</li>)}</ul>
+           <p className="text-xs text-gray-400">Trend readings supplied: {diagnosis.trend_readings || 0} · Matching reference excerpts: {diagnosis.references?.length || 0}</p>
+-          {diagnosis.references?.map(ref => <details key={ref.excerpt_id}><summary className="text-sm text-[#06B6D4] cursor-pointer">Reference: {ref.title}</summary><p className="text-xs text-gray-400">{ref.source} · User-supplied</p><p className="text-sm whitespace-pre-wrap mt-2">{ref.excerpt}</p></details>)}
++          {diagnosis.references?.map(ref => <details key={ref.excerpt_id}><summary className="text-sm text-[#06B6D4] cursor-pointer">Reference: {ref.title}</summary><p className="text-xs text-gray-400">{ref.source} · {ref.verification === 'sample' ? 'SAMPLE — not verified OEM guidance' : 'User-supplied'}</p><p className="text-sm whitespace-pre-wrap mt-2">{ref.excerpt}</p></details>)}
+           {diagnosis.work_order_id ? <div className="space-y-2 border-t border-[#374151] pt-4"><p className="text-sm break-all">Saved work order: {diagnosis.work_order_id}</p><button className={button} onClick={() => navigate('maintenance')}>Open maintenance</button></div> : <form data-task-form className="space-y-3 border-t border-[#374151] pt-4" onSubmit={e => { e.preventDefault(); if (!historicalReviewed) return; action(async () => { const task = await api(`/api/diagnostics/${diagnosis.id}/work-order`, { method: 'POST', body: JSON.stringify({ title: taskTitle, assigned_to: assignee, priority, reviewed_historical_context: stale && historicalReviewed }) }); await loadTasks(); setDiagnosticOpen(false); setView('maintenance'); return task; }, 'Inspection work order saved. Repeated approval reuses the same order.'); }}>
+             <h3 className="font-semibold">Approve an inspection work order</h3>
+             {stale && <label className="master-historical-review"><input type="checkbox" checked={historicalReviewed} onChange={e => setReviewedContext(e.target.checked ? reviewKey : '')} />I reviewed the saved sensor evidence and understand this investigation belongs to an earlier monitoring context.</label>}
+@@ -189,9 +196,9 @@
+ 
+   function content() {
+     if (view === 'settings') return <section className={panel}><h2 className="text-lg font-semibold">Connect a demo role</h2><p className="text-sm text-gray-400">Use FORGEMIND_ADMIN_TOKEN or FORGEMIND_TECHNICIAN_TOKEN from the local integration .env. This is a demo access token, never your AMD API key. Your session survives refresh for up to eight hours on this local app. Sign out on shared computers.</p>
+-      <form className="space-y-3" onSubmit={async e => { e.preventDefault(); setToken(credential); setBusy(true); setNoticeError(false); try { const current = await api('/api/session', { method: 'POST' }); setToken(''); setUser(current); await loadTasks(); setCredential(''); setNotice(`Connected as ${current.role}`); } catch (err) { setToken(''); setUser(null); setNoticeError(true); setNotice(err.message); } finally { setBusy(false); } }}><label className="block">Demo access token<input type="password" autoComplete="off" className={input} value={credential} onChange={e => setCredential(e.target.value)} required /></label><button className={button} disabled={busy}>Connect</button></form>
++      <form className="space-y-3" onSubmit={async e => { e.preventDefault(); setToken(credential); setBusy(true); setNoticeError(false); try { const current = await api('/api/session', { method: 'POST' }); setToken(''); setAudit(null); setUser(current); await loadTasks(); setCredential(''); setNotice(`Connected as ${current.role}`); } catch (err) { setToken(''); setUser(null); setNoticeError(true); setNotice(err.message); } finally { setBusy(false); } }}><label className="block">Demo access token<input type="password" autoComplete="off" className={input} value={credential} onChange={e => setCredential(e.target.value)} required /></label><button className={button} disabled={busy}>Connect</button></form>
+       {admin && <details><summary className="cursor-pointer text-[#06B6D4]" onClick={() => action(async () => { setAudit(await api('/api/v1/admin/audit-logs?limit=100')); }, 'Audit log loaded')}>View audit log</summary>{audit?.slice().reverse().map(log => <article className="py-2 border-b border-[#374151] text-xs" key={log.id}><p>{new Date(log.timestamp).toLocaleString()} · {log.username} · {log.action}</p><pre className="whitespace-pre-wrap break-all text-gray-400">{log.details}</pre></article>)}</details>}
+-      {user && <button className={button} onClick={() => action(async () => { await api('/api/session', { method: 'DELETE' }); setToken(''); setUser(null); setTasks([]); }, 'Disconnected')}>Disconnect {user.role}</button>}
++      {user && <button className={button} onClick={() => action(async () => { await api('/api/session', { method: 'DELETE' }); setToken(''); setUser(null); setTasks([]); setAudit(null); setSelectedDiagnosis(null); setDiagnosticOpen(false); setData(previous => previous ? { ...previous, diagnostic: null, diagnoses: [] } : previous); }, 'Disconnected')}>Disconnect {user.role}</button>}
+     </section>;
+     if (view === 'maintenance') return maintenance();
+     if (view === 'equipment') return <section className={panel}>
+--- github-main/frontend/src/master/Dashboard.jsx
++++ arena-retained/frontend/src/master/Dashboard.jsx
+@@ -21,7 +21,7 @@
+       <div className="master-telemetry-grid">{visible.map((config, index) => <TelemetryCard key={config.field} config={config} reading={reading} history={chartHistory} running={data?.status.is_running} index={index} onFullData={() => navigate('analytics')} />)}</div>
+       {!visible.length && <div className="master-empty"><strong>No channels match this filter</strong><button className="master-text-button" onClick={() => { onStatusFilter('all'); onClearSearch(); }}>Clear filters</button></div>}
+     </section>
+-    <section className="master-controls" aria-label="Synthetic scenario controls"><span className="master-controls-label">DEMO SCENARIO</span><div className="master-control-group">{['normal', 'warning', 'critical', 'recovery'].map(scenario => <button disabled={busy} aria-pressed={data?.status.scenario === scenario} key={scenario} onClick={() => action(() => api('/api/simulator/scenario', { method: 'POST', body: JSON.stringify({ scenario }) }), `Scenario changed to ${scenario}`)}>{scenario}</button>)}</div><span className="master-control-divider" /><button disabled={busy} onClick={() => action(() => api(`/api/simulator/${data?.status.is_running ? 'stop' : 'start'}`, { method: 'POST' }), 'Simulator updated')}>{data?.status.is_running ? 'Pause monitoring' : 'Start monitoring'}</button><button disabled={busy} onClick={() => action(() => api('/api/simulator/reset', { method: 'POST' }), 'Readings reset. Saved investigations and work orders are retained.')}>Reset readings</button><span className="master-controls-note">Software-generated readings</span></section>
++    <section className="master-controls" aria-label="Synthetic scenario controls"><span className="master-controls-label">DEMO SCENARIO</span><div className="master-control-group">{['normal', 'warning', 'critical', 'recovery'].map(scenario => <button disabled={busy || !user} aria-pressed={data?.status.scenario === scenario} key={scenario} onClick={() => action(() => api('/api/simulator/scenario', { method: 'POST', body: JSON.stringify({ scenario }) }), `Scenario changed to ${scenario}`)}>{scenario}</button>)}</div><span className="master-control-divider" /><button disabled={busy || !user} onClick={() => action(() => api(`/api/simulator/${data?.status.is_running ? 'stop' : 'start'}`, { method: 'POST' }), 'Simulator updated')}>{data?.status.is_running ? 'Pause monitoring' : 'Start monitoring'}</button><button disabled={busy || !user} onClick={() => action(() => api('/api/simulator/reset', { method: 'POST' }), 'Readings reset. Saved investigations and work orders are retained.')}>Reset readings</button><span className="master-controls-note">Software-generated readings · Connect a demo role to change scenarios</span></section>
+     <section><div className="master-section-title"><div><h2>Active Incidents <span className="master-count">{data?.status.active_incidents || 0}</span></h2><p>Review alerts, investigate causes, and coordinate an inspection.</p></div><button onClick={onAllAlerts}>View all alerts <ArrowRight size={14} /></button></div><div className="master-incident-list">{alerts.map(alert => <IncidentCard key={alert.id} alert={alert} onInvestigate={onInvestigate} onDispatch={onInvestigate} canDispatch={canDispatch} canAcknowledge={Boolean(user)} busy={busy} onAcknowledge={() => action(() => api(`/api/alerts/${alert.id}/acknowledge`, { method: 'PATCH' }), 'Incident acknowledged. Recovery is determined by readings.')} />)}</div>
+       {!alerts.length && <div className="master-empty"><strong>{search ? 'No incidents match your search' : 'No active incidents'}</strong>{search ? 'Try a machine ID or sensor term.' : 'New alerts appear here when a demo threshold is exceeded.'}</div>}
+     </section>
+--- github-main/frontend/src/master/DemoGuide.jsx
++++ arena-retained/frontend/src/master/DemoGuide.jsx
+@@ -5,7 +5,7 @@
+   const task = tasks.find(item => item.id === diagnosis?.work_order_id);
+   const steps = [
+     { title: 'Observe the signal', detail: `${data?.history.length || 0} saved synthetic readings. Select Critical below to open an incident.`, done: Boolean(data?.alerts.length), action: 'View incidents', click: () => onNavigate('alerts') },
+-    { title: 'Investigate with AMD', detail: diagnosis?.status === 'completed' ? `Saved AMD assessment with ${diagnosis.trend_readings || 0} trend readings.` : diagnosis?.status === 'pending' ? 'AMD is processing. Monitoring continues in the background.' : 'Request analysis explicitly. Sensor evidence is preserved if AMD is unavailable.', done: diagnosis?.status === 'completed', pending: diagnosis?.status === 'pending', action: 'Open investigation', click: onInvestigate },
++    { title: diagnosis?.origin === 'external' ? 'Review external evidence' : 'Investigate with AMD', detail: diagnosis?.status === 'completed' ? diagnosis.origin === 'external' ? 'Saved EXTERNAL assessment (not AMD). Explicit human review required.' : `Saved AMD assessment with ${diagnosis.trend_readings || 0} trend readings.` : diagnosis?.status === 'pending' ? 'AMD is processing. Monitoring continues in the background.' : 'Request analysis explicitly. Sensor evidence is preserved if AMD is unavailable.', done: diagnosis?.status === 'completed', pending: diagnosis?.status === 'pending', action: 'Open investigation', click: onInvestigate },
+     { title: 'Approve an inspection', detail: diagnosis?.work_order_id ? `Work order saved${task ? ` · ${task.status}` : ''}. Human approval is recorded.` : 'Review the evidence and assign a technician. No equipment is controlled.', done: Boolean(diagnosis?.work_order_id), action: diagnosis?.work_order_id ? 'View work order' : 'Review and approve', click: diagnosis?.work_order_id ? () => onNavigate('maintenance') : onInvestigate },
+     { title: 'Verify recovery', detail: 'Select Recovery below and watch the readings settle. Task completion and sensor recovery are separate events.', done: Boolean(data?.alerts.some(item => item.state === 'resolved')) && data?.status.latest_reading?.health_status === 'HEALTHY', action: 'View recovery history', click: () => onNavigate('alerts') },
+   ];
+--- github-main/frontend/src/master/InvestigationEvidence.jsx
++++ arena-retained/frontend/src/master/InvestigationEvidence.jsx
+@@ -7,6 +7,7 @@
+   if (!snapshot) return <p>Saved sensor evidence is unavailable for this investigation.</p>;
+   return <section className="master-evidence" aria-label="Saved investigation evidence">
+     <div className="master-evidence-heading"><div><h3>Evidence at request time</h3><p>{new Date(snapshot.timestamp).toLocaleString()} · {snapshot.health_status}</p></div><button className="master-button master-secondary" onClick={() => downloadInvestigation(diagnosis, task)}><Download size={14} />Export investigation</button></div>
++    {diagnosis.origin === 'external' && <><p className="master-evidence-note">External caller-supplied evidence · {diagnosis.data_source === 'sensor' ? 'REAL claimed, not verified' : 'DEMO / synthetic'} · Original sensor units preserved. Not an AMD result.</p><ul>{snapshot.readings?.map((reading, index) => <li key={index}>{reading.sensor}: {reading.value} {reading.unit}{reading.triggered ? ' · caller flagged' : ''}</li>)}</ul></>}
+     <dl className="master-evidence-readings">{fields.map(config => <div key={config.field}><dt>{config.title}</dt><dd>{Number.isFinite(snapshot[config.field]) ? snapshot[config.field].toFixed(config.precision) : '—'} <small>{config.unit}</small></dd></div>)}</dl>
+     <ul className="master-evidence-reasons">{snapshot.anomaly_reasons?.map(reason => <li key={reason}>{reason}</li>)}</ul>
+     <p className="master-evidence-note">Saved snapshot · {diagnosis.trend_readings || 0} trend readings · {diagnosis.references?.length || 0} reference excerpts. Live charts can change after this snapshot.</p>
+--- github-main/frontend/src/master/investigation.js
++++ arena-retained/frontend/src/master/investigation.js
+@@ -7,7 +7,7 @@
+   const snapshot = diagnosis.telemetry_snapshot || {};
+   const lines = [
+     '# ForgeMind investigation report', '',
+-    'Synthetic telemetry demonstration. Illustrative thresholds are not validated equipment safety limits. AI suggestions require qualified human review.', '',
++    diagnosis.origin === 'external' ? `EXTERNAL assessment. ${diagnosis.data_source === 'sensor' ? 'REAL measurements claimed by caller, not independently verified.' : 'DEMO / synthetic readings.'} No AMD execution is claimed. Qualified human review required.` : 'Synthetic telemetry demonstration. Illustrative thresholds are not validated equipment safety limits. AI suggestions require qualified human review.', '',
+     `Investigation: ${diagnosis.id}`, `Machine: ${diagnosis.machine_id}`,
+     `Requested: ${diagnosis.timestamp}`, `Status: ${diagnosis.status}`,
+     `Monitoring context: ${diagnosis.context_id}`, '',
+@@ -16,6 +16,7 @@
+     `Vibration velocity RMS: ${snapshot.vibration ?? 'Unavailable'} mm/s`,
+     `Current: ${snapshot.current ?? 'Unavailable'} A`,
+     `Detector state: ${snapshot.health_status || 'Unavailable'}`,
++    ...(snapshot.readings || []).map(row => `Original reading: ${row.sensor}: ${row.value} ${row.unit} (caller triggered: ${row.triggered})`),
+     ...(snapshot.anomaly_reasons || []).map(reason => `- ${reason}`), '',
+     '## AI-assisted assessment', diagnosis.primaryHypothesis?.description || diagnosis.message || 'No completed assessment.', '',
+     'Possible causes:', ...(diagnosis.alternatives || []).map(item => `- ${item.title}`), '',
+@@ -29,7 +30,7 @@
+     `End-to-end tokens/s: ${diagnosis.inference?.end_to_end_tokens_per_sec ?? 'Unavailable'}`,
+     `Hardware: ${diagnosis.inference?.hardware || 'Not reported by provider'}`, '',
+     `Trend readings supplied: ${diagnosis.trend_readings || 0}`,
+-    '## Reference excerpts (user-supplied, not independently verified)',
++    '## Reference excerpts (SAMPLE or user-supplied, not independently verified)',
+     ...(diagnosis.references?.length ? diagnosis.references.flatMap(ref => [ref.title, ref.source, ref.source_url || '', ref.excerpt, '']) : ['No reference excerpts were supplied.']), '',
+     '## Human-approved inspection work order',
+     `Work order: ${diagnosis.work_order_id || 'Not approved'}`,
+--- github-main/frontend/tests/investigation.test.mjs
++++ arena-retained/frontend/tests/investigation.test.mjs
+@@ -41,3 +41,20 @@
+   assert.equal(history.length, 3);
+   assert.equal(chartReadings([{ timestamp: 'invalid', vibration: 9 }], 'vibration').length, 0);
+ });
++
++test('external real-claim report preserves acceleration units and never claims AMD execution', () => {
++  const report = investigationReport({ id: 'DIAG-EXT-test', origin: 'external', data_source: 'sensor', status: 'completed',
++    telemetry_snapshot: { readings: [{ sensor: 'vibration', value: 3.5, unit: 'g', triggered: true }] } });
++  assert.match(report, /REAL measurements claimed by caller, not independently verified/);
++  assert.match(report, /No AMD execution is claimed/);
++  assert.match(report, /Original reading: vibration: 3.5 g/);
++  assert.match(report, /Vibration velocity RMS: Unavailable mm\/s/);
++  assert.doesNotMatch(report, /Vibration velocity RMS: 3.5 mm\/s/);
++});
++
++test('external demo report is labelled synthetic and has no fabricated provider metrics', () => {
++  const report = investigationReport({ id: 'DIAG-EXT-demo', origin: 'external', data_source: 'synthetic', status: 'completed' });
++  assert.match(report, /DEMO \/ synthetic readings/);
++  assert.match(report, /Model: Unavailable/);
++  assert.match(report, /Whole-request duration: Unavailable/);
++});
+--- github-main/tests/test_integration.py
++++ arena-retained/tests/test_integration.py
+@@ -15,20 +15,10 @@
+ TECH_AUTH = {'Authorization': 'Bearer ' + TECH}
+ 
+ 
+-@pytest.fixture(autouse=True)
+-def environment(monkeypatch, tmp_path):
+-    monkeypatch.setenv('FORGEMIND_ADMIN_TOKEN', ADMIN)
+-    monkeypatch.setenv('FORGEMIND_TECHNICIAN_TOKEN', TECH)
+-    monkeypatch.setenv('FORGEMIND_EVENT_DB', str(tmp_path / 'events.sqlite3'))
+-    monkeypatch.setenv('FORGEMIND_WORKFLOW_DATABASE_URL', 'sqlite:///' + (tmp_path / 'workflow.sqlite3').as_posix())
+-    monkeypatch.setenv('AMD_API_KEY', 'test-only')
+-    monkeypatch.setenv('AMD_TOKEN_FACTORY_URL', 'https://example.com/v1/chat/completions')
+-    monkeypatch.setenv('AMD_MODEL', 'test-model')
+-
+ 
+ def wait_finished(client):
+     for _ in range(100):
+-        result = client.get('/api/diagnostics/latest').json()['diagnostic']
++        result = client.get('/api/diagnostics/latest', headers=AUTH).json()['diagnostic']
+         if result and result['status'] != 'pending':
+             return result
+         time.sleep(0.01)
+@@ -46,7 +36,7 @@
+ 
+ def test_normal_empty_and_authentication():
+     with TestClient(server.app) as client:
+-        assert client.get('/api/diagnostics/latest').json()['diagnostic'] is None
++        assert client.get('/api/diagnostics/latest', headers=AUTH).json()['diagnostic'] is None
+         assert client.get('/api/simulator/status').json()['latest_reading']['health_status'] == 'HEALTHY'
+         assert client.post('/api/diagnostics/request').status_code == 401
+         assert client.post('/api/diagnostics/request', headers=TECH_AUTH).status_code == 403
+@@ -54,7 +44,7 @@
+         assert client.get('/api/session', headers=AUTH).json()['role'] == 'admin'
+         assert client.get('/api/session', headers=TECH_AUTH).json()['role'] == 'technician'
+         assert client.get('/api/telemetry/history?machine_id=unknown').status_code == 404
+-        assert client.post('/api/simulator/scenario', json={'scenario': 'typo'}).status_code == 422
++        assert client.post('/api/simulator/scenario', json={'scenario': 'typo'}, headers=AUTH).status_code == 422
+ 
+ 
+ def test_scenario_does_not_call_amd(monkeypatch):
+@@ -62,18 +52,18 @@
+         pytest.fail('Scenario changes must not consume provider quota')
+     monkeypatch.setattr(server, 'diagnose', forbidden)
+     with TestClient(server.app) as client:
+-        assert client.post('/api/simulator/scenario', json={'scenario': 'critical'}).status_code == 200
++        assert client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH).status_code == 200
+         reading = client.get('/api/simulator/status').json()['latest_reading']
+         assert reading['vibration_unit'] == 'mm/s RMS'
+         assert reading['health_status'] == 'CRITICAL'
+         assert client.get('/api/alerts').json()['count'] > 0
+-        assert client.get('/api/diagnostics/latest').json()['diagnostic'] is None
++        assert client.get('/api/diagnostics/latest', headers=AUTH).json()['diagnostic'] is None
+ 
+ 
+ def test_background_inference_cooldown_and_work_order_lifecycle(monkeypatch):
+     monkeypatch.setattr(server, 'diagnose', fake_diagnosis)
+     with TestClient(server.app) as client:
+-        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
++        client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH)
+         start = client.post('/api/diagnostics/request', headers=AUTH)
+         assert start.status_code == 202
+         duplicate = client.post('/api/diagnostics/request', headers=AUTH).json()
+@@ -97,7 +87,7 @@
+         assert any(log['action'] == 'DIAGNOSIS_WORK_ORDER_APPROVED' for log in logs)
+     with TestClient(server.app) as client:
+         assert client.get('/api/v1/tasks', headers=AUTH).json()[0]['status'] == 'Completed'
+-        assert client.get('/api/diagnostics/latest').json()['diagnostic']['status'] == 'completed'
++        assert client.get('/api/diagnostics/latest', headers=AUTH).json()['diagnostic']['status'] == 'completed'
+         assert client.post(endpoint, json=payload, headers=AUTH).json()['id'] == task['id']
+ 
+ 
+@@ -106,7 +96,7 @@
+         raise AMDUnavailable('AMD timed out')
+     monkeypatch.setattr(server, 'diagnose', broken)
+     with TestClient(server.app) as client:
+-        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
++        client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH)
+         client.post('/api/diagnostics/request', headers=AUTH)
+         result = wait_finished(client)
+         assert result['status'] == 'unavailable'
+@@ -148,11 +138,11 @@
+ 
+ def test_warning_escalation_acknowledgement_and_recovery():
+     with TestClient(server.app) as client:
+-        client.post('/api/simulator/scenario', json={'scenario': 'warning'})
++        client.post('/api/simulator/scenario', json={'scenario': 'warning'}, headers=AUTH)
+         assert client.get('/api/simulator/status').json()['latest_reading']['health_status'] == 'WARNING'
+         alert = client.get('/api/alerts').json()['alerts'][0]
+         assert alert['state'] == 'active'
+-        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
++        client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH)
+         escalated = client.get('/api/alerts').json()['alerts']
+         assert len(escalated) == 1
+         assert escalated[0]['id'] == alert['id']
+@@ -161,15 +151,15 @@
+         acknowledged = client.patch('/api/alerts/' + alert['id'] + '/acknowledge', headers=TECH_AUTH).json()
+         assert acknowledged['acknowledged'] is True
+         assert acknowledged['state'] == 'active'
+-        client.post('/api/simulator/stop')
++        client.post('/api/simulator/stop', headers=AUTH)
+         assert client.get('/api/alerts').json()['alerts'][0]['state'] == 'active'
+-        client.post('/api/simulator/start')
+-        client.post('/api/simulator/scenario', json={'scenario': 'normal'})
++        client.post('/api/simulator/start', headers=AUTH)
++        client.post('/api/simulator/scenario', json={'scenario': 'normal'}, headers=AUTH)
+         resolved = client.get('/api/alerts').json()['alerts'][0]
+         assert resolved['state'] == 'resolved'
+         assert resolved['resolved_at']
+         assert client.get('/api/simulator/status').json()['active_incidents'] == 0
+-        client.post('/api/simulator/scenario', json={'scenario': 'warning'})
++        client.post('/api/simulator/scenario', json={'scenario': 'warning'}, headers=AUTH)
+         assert client.get('/api/alerts').json()['count'] == 2
+ 
+ 
+@@ -207,8 +197,8 @@
+ 
+ def test_simulator_pause_and_context_survive_restart():
+     with TestClient(server.app) as client:
+-        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
+-        client.post('/api/simulator/stop')
++        client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH)
++        client.post('/api/simulator/stop', headers=AUTH)
+         previous = client.get('/api/simulator/status').json()
+     with TestClient(server.app) as client:
+         resumed = client.get('/api/simulator/status').json()
+@@ -216,7 +206,7 @@
+         assert resumed['scenario'] == 'critical'
+         assert resumed['context_id'] == previous['context_id']
+         assert resumed['tick_count'] == previous['tick_count']
+-        client.post('/api/simulator/reset')
++        client.post('/api/simulator/reset', headers=AUTH)
+         reset = client.get('/api/simulator/status').json()
+         assert reset['context_id'] != previous['context_id']
+         assert reset['scenario'] == 'normal'
+@@ -253,10 +243,10 @@
+     monkeypatch.setattr(server, 'diagnose', capture)
+     with TestClient(server.app) as client:
+         client.post('/api/documents', json=REFERENCE, headers=AUTH)
+-        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
++        client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH)
+         original_context = client.get('/api/simulator/status').json()['context_id']
+         client.post('/api/diagnostics/request', headers=AUTH)
+-        client.post('/api/simulator/scenario', json={'scenario': 'normal'})
++        client.post('/api/simulator/scenario', json={'scenario': 'normal'}, headers=AUTH)
+         result = wait_finished(client)
+         assert result['context_id'] == original_context
+         assert result['telemetry_snapshot']['scenario'] == 'critical'
+@@ -264,13 +254,13 @@
+         assert seen['references'][0]['verification'] == 'user_supplied'
+         assert seen['recent_readings'][-1]['health_status'] == 'CRITICAL'
+         assert result['references'][0]['excerpt'] == REFERENCE['text']
+-        assert client.get('/api/diagnostics/history').json()[0]['id'] == result['id']
++        assert client.get('/api/diagnostics/history', headers=AUTH).json()[0]['id'] == result['id']
+ 
+ 
+ def test_assignment_persists_and_completed_tasks_cannot_be_reassigned(monkeypatch):
+     monkeypatch.setattr(server, 'diagnose', fake_diagnosis)
+     with TestClient(server.app) as client:
+-        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
++        client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH)
+         client.post('/api/diagnostics/request', headers=AUTH)
+         diagnosis = wait_finished(client)
+         task = client.post('/api/diagnostics/' + diagnosis['id'] + '/work-order', headers=AUTH,
+@@ -285,12 +275,12 @@
+ def test_historical_approval_requires_explicit_review_and_is_idempotent(monkeypatch):
+     monkeypatch.setattr(server, 'diagnose', fake_diagnosis)
+     with TestClient(server.app) as client:
+-        client.post('/api/simulator/scenario', json={'scenario': 'critical'})
++        client.post('/api/simulator/scenario', json={'scenario': 'critical'}, headers=AUTH)
+         client.post('/api/diagnostics/request', headers=AUTH)
+         diagnosis = wait_finished(client)
+         assert diagnosis['context_readings'][-1]['health_status'] == 'CRITICAL'
+         original_readings = diagnosis['context_readings']
+-        client.post('/api/simulator/scenario', json={'scenario': 'normal'})
++        client.post('/api/simulator/scenario', json={'scenario': 'normal'}, headers=AUTH)
+         endpoint = '/api/diagnostics/' + diagnosis['id'] + '/work-order'
+         payload = {'title': 'Historical evidence review', 'assigned_to': 'Reviewer', 'priority': 'HIGH'}
+         assert client.post(endpoint, headers=AUTH, json=payload).status_code == 409
+@@ -306,7 +296,7 @@
+         assert approval['historical_context'] is True
+         assert approval['reviewed_historical_context'] is True
+     with TestClient(server.app) as client:
+-        saved = client.get('/api/diagnostics/latest').json()['diagnostic']
++        saved = client.get('/api/diagnostics/latest', headers=AUTH).json()['diagnostic']
+         assert saved['context_readings'] == original_readings
+         assert saved['work_order_id'] == task_id
+ 

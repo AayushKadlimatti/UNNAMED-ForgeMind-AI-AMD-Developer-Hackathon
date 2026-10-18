@@ -1,0 +1,89 @@
+{
+  "repository": "https://github.com/AayushKadlimatti/UNNAMED-ForgeMind-AI-AMD-Developer-Hackathon",
+  "main_commit": "fd5e276e1800e55967ad7b2d76544aa7592ab90a",
+  "github_snapshot_download": "https://codeload.github.com/AayushKadlimatti/UNNAMED-ForgeMind-AI-AMD-Developer-Hackathon/zip/fd5e276e1800e55967ad7b2d76544aa7592ab90a",
+  "input_archives": {
+    "arena": {
+      "filename": "ForgeMind-integrated-safe.zip",
+      "sha256": "eabfd6505695a99b9767d66a09a159af2b5628129909fdb9fd740ef8d4507a79",
+      "source_files": 158
+    },
+    "github": {
+      "filename": "github-main-fd5e276.zip",
+      "sha256": "dab3b2a222bd4278c6467fff70d2cad6b4f2f28c0c83936da9f3fe746afee08a",
+      "source_files": 150
+    }
+  },
+  "comparison_counts": {
+    "identical": 133,
+    "arena_modified": 17,
+    "arena_only": 8
+  },
+  "pull_requests": [
+    {
+      "number": 1,
+      "title": "Integrate AMD diagnostics and maintenance with master dashboard",
+      "merged": true,
+      "merged_at": "2026-10-17T04:26:22Z",
+      "merge_commit_sha": "91bb561382ebf74ef1b906fc36b3c4e0d50948d9",
+      "base_sha": "56c76081f7451f5c1e7763670721a51e22810da0",
+      "head_sha": "0a65ea27d7c8dd4243ae6cf67592ec517280ae60",
+      "changed_files": 60,
+      "revision_counts": {
+        "exact_pr_revision": 45,
+        "updated_by_later_pr": 15
+      }
+    },
+    {
+      "number": 2,
+      "title": "Make industrial demo evidence reviewable and easy to rehearse",
+      "merged": true,
+      "merged_at": "2026-10-17T04:40:16Z",
+      "merge_commit_sha": "fd5e276e1800e55967ad7b2d76544aa7592ab90a",
+      "base_sha": "91bb561382ebf74ef1b906fc36b3c4e0d50948d9",
+      "head_sha": "1de88afce4329ec4d4b90adc83e286ae96e36ba3",
+      "changed_files": 25,
+      "revision_counts": {
+        "exact_pr_revision": 25
+      }
+    }
+  ],
+  "resolution": "No missing PR functionality identified. Preserve all 158 Arena source files byte-for-byte; no runtime code or dependency changes are needed.",
+  "pr_path_overlap": 15,
+  "unique_pr_changed_paths": 70,
+  "verification": {
+    "github_baseline_backend_tests": {
+      "passed": 24,
+      "upstream_warnings": 1
+    },
+    "consolidated_backend_tests": {
+      "passed": 93,
+      "upstream_warnings": 1
+    },
+    "frontend_tests": {
+      "passed": 6,
+      "failed": 0
+    },
+    "frontend_build": "passed",
+    "pip_check": "No broken requirements found",
+    "full_frontend_lint": {
+      "exit_code": 0,
+      "warnings": 64,
+      "errors": 0
+    },
+    "targeted_frontend_lint": {
+      "warnings": 0,
+      "errors": 0
+    },
+    "arena_source_files_preserved": 158,
+    "github_paths_present": 150,
+    "prototype_files_identical": 37,
+    "python": "3.13.16",
+    "sqlite": "3.46.1",
+    "live_amd_called": false,
+    "browser_acceptance_performed": false,
+    "pushed": false,
+    "deployed": false
+  },
+  "input_archive_hashes_rechecked_unchanged": true
+}
